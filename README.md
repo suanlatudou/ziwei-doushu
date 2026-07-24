@@ -199,3 +199,4 @@ npm run dev
 
 - 线上平台：[wdyziweidoushu666.com](https://wdyziweidoushu666.com)
 - Issues：欢迎提 Bug 和建议
+<!-- Trigger Cloudflare Pages deployment after static export fixes -->
