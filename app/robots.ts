@@ -1,6 +1,8 @@
 import type { MetadataRoute } from 'next';
 
-const BASE_URL = 'https://wdyziweidoushu666.com';
+export const dynamic = 'force-static';
+
+const BASE_URL = 'https://ziwei-doushu-5xd.pages.dev';
 
 export default function robots(): MetadataRoute.Robots {
   return {
