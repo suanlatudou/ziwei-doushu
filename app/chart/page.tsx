@@ -3,6 +3,7 @@ import { useState } from 'react';
 import BirthForm from '@/components/BirthForm';
 import ChartBoard from '@/components/ChartBoard';
 import InsightPanel from '@/components/InsightPanel';
+import AiConsentGate from '@/components/AiConsentGate';
 import { generateChart } from '@/lib/ziwei/algorithm';
 import type { BirthInfo, ZiweiChart, Palace } from '@/lib/ziwei/types';
 
@@ -61,7 +62,9 @@ export default function ChartPage() {
         </section>
 
         <section className="h-[68vh] min-h-[520px] min-w-0 sm:h-[620px] xl:sticky xl:top-4 xl:h-[720px]">
-          <InsightPanel chart={chart} selectedPalace={selectedPalace} />
+          <AiConsentGate>
+            <InsightPanel chart={chart} selectedPalace={selectedPalace} />
+          </AiConsentGate>
         </section>
       </div>
     </main>
