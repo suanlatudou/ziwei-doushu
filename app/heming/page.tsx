@@ -22,8 +22,22 @@ interface CompatibilityConfig {
   focusPalaces: string;
   analysisInstruction: string;
   reportStructure: string;
+  scoreDimensions: [string, string, string, string];
   quickQuestions: string[];
   questionPlaceholder: string;
+}
+
+interface ScoreDimension {
+  label: string;
+  score: number;
+}
+
+interface CompatibilityScore {
+  overall: number;
+  summary: string;
+  dimensions: ScoreDimension[];
+  strengths: string[];
+  cautions: string[];
 }
 
 const COMPATIBILITY_TYPES: Record<CompatibilityType, CompatibilityConfig> = {
@@ -56,6 +70,7 @@ const COMPATIBILITY_TYPES: Record<CompatibilityType, CompatibilityConfig> = {
 
 **【综合结论】**
 总结关系优势与需要共同面对的课题，不以合盘结果替代现实判断。`,
+    scoreDimensions: ['吸引契合', '情感理解', '沟通协作', '长期稳定'],
     quickQuestions: ['感情匹配度如何？', '两人结婚需要注意什么？', '谁更需要安全感？', '哪方面最容易产生矛盾？', '怎样沟通最有效？'],
     questionPlaceholder: '继续追问，如：两个人长期相处最需要注意什么？',
   },
@@ -88,6 +103,7 @@ const COMPATIBILITY_TYPES: Record<CompatibilityType, CompatibilityConfig> = {
 
 **【综合结论】**
 总结合作优势、前置条件与不适合贸然推进的部分，不替代法律或商业尽调。`,
+    scoreDimensions: ['能力互补', '决策协同', '利益边界', '长期合作'],
     quickQuestions: ['适合合伙创业吗？', '双方应该如何分工？', '谁更适合主导决策？', '财务合作要注意什么？', '最容易因为什么闹矛盾？'],
     questionPlaceholder: '继续追问，如：两个人合作时谁更适合管钱？',
   },
@@ -120,6 +136,7 @@ const COMPATIBILITY_TYPES: Record<CompatibilityType, CompatibilityConfig> = {
 
 **【综合结论】**
 总结亲子关系的优势和共同课题，不替代教育、心理或医疗专业意见。`,
+    scoreDimensions: ['情感连接', '沟通理解', '教养适配', '成长支持'],
     quickQuestions: ['孩子最需要什么支持？', '家长容易在哪方面管得太多？', '怎样沟通孩子更愿意听？', '亲子冲突主要来自哪里？', '如何培养孩子的优势？'],
     questionPlaceholder: '继续追问，如：家长应该怎样减少孩子的抵触？',
   },
@@ -152,16 +169,131 @@ const COMPATIBILITY_TYPES: Record<CompatibilityType, CompatibilityConfig> = {
 
 **【综合结论】**
 总结关系优势和需要尊重的边界，不对友谊作绝对结论。`,
+    scoreDimensions: ['相互欣赏', '信任程度', '边界适配', '长期维系'],
     quickQuestions: ['为什么两个人容易成为朋友？', '谁更主动维系关系？', '最容易因为什么疏远？', '金钱往来需要注意什么？', '怎样让友谊更长久？'],
     questionPlaceholder: '继续追问，如：两个人发生矛盾后谁适合先沟通？',
   },
 };
 
+function clampScore(value: unknown): number {
+  const number = typeof value === 'number' ? value : Number(value);
+  if (!Number.isFinite(number)) return 0;
+  return Math.max(0, Math.min(100, Math.round(number)));
+}
+
+function parseScoreMarker(text: string): CompatibilityScore | null {
+  const marker = text.match(/<!--SCORE:(\{[\s\S]*?\})-->/);
+  if (!marker) return null;
+
+  try {
+    const raw = JSON.parse(marker[1]) as Record<string, unknown>;
+    const rawDimensions = Array.isArray(raw.dimensions) ? raw.dimensions : [];
+    const dimensions = rawDimensions
+      .map(item => {
+        if (!item || typeof item !== 'object') return null;
+        const record = item as Record<string, unknown>;
+        const label = typeof record.label === 'string' ? record.label.trim() : '';
+        if (!label) return null;
+        return { label, score: clampScore(record.score) };
+      })
+      .filter((item): item is ScoreDimension => item !== null)
+      .slice(0, 4);
+
+    const strengths = Array.isArray(raw.strengths)
+      ? raw.strengths.filter((item): item is string => typeof item === 'string' && item.trim().length > 0).slice(0, 3)
+      : [];
+    const cautions = Array.isArray(raw.cautions)
+      ? raw.cautions.filter((item): item is string => typeof item === 'string' && item.trim().length > 0).slice(0, 3)
+      : [];
+
+    return {
+      overall: clampScore(raw.overall),
+      summary: typeof raw.summary === 'string' ? raw.summary.trim() : '',
+      dimensions,
+      strengths,
+      cautions,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function removeScoreMarker(text: string): string {
+  return text
+    .replace(/<!--SCORE:[\s\S]*?-->\s*/g, '')
+    .replace(/<!--SCORE:[\s\S]*$/g, '')
+    .trimStart();
+}
+
+function ScoreCard({ score, typeLabel, isDark }: { score: CompatibilityScore; typeLabel: string; isDark: boolean }) {
+  return (
+    <section style={{
+      marginBottom: '24px', padding: '22px', borderRadius: '16px',
+      border: '1px solid rgba(184,146,42,0.28)',
+      background: isDark ? 'rgba(212,168,67,0.07)' : 'rgba(184,146,42,0.07)',
+    }}>
+      <div className="score-overview" style={{ display: 'grid', gridTemplateColumns: '150px 1fr', gap: '24px', alignItems: 'center' }}>
+        <div style={{ textAlign: 'center' }}>
+          <div style={{
+            width: '118px', height: '118px', margin: '0 auto 10px', borderRadius: '50%',
+            display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
+            border: '1px solid rgba(184,146,42,0.45)',
+            background: isDark ? 'rgba(2,8,16,0.45)' : 'rgba(255,255,255,0.7)',
+            boxShadow: 'inset 0 0 28px rgba(184,146,42,0.08)',
+          }}>
+            <div style={{ fontSize: '36px', lineHeight: 1, fontWeight: 650, color: 'var(--ac)' }}>{score.overall}</div>
+            <div style={{ marginTop: '5px', fontSize: '10px', color: 'var(--tx-3)', letterSpacing: '0.12em' }}>满分 100</div>
+          </div>
+          <div style={{ fontSize: '11px', color: 'var(--tx-2)', fontWeight: 600 }}>{typeLabel}互动参考指数</div>
+          <div style={{ marginTop: '4px', fontSize: '9px', color: 'var(--tx-3)' }}>AI 生成 · 不是概率或科学测量</div>
+        </div>
+
+        <div>
+          {score.summary && (
+            <p style={{ marginBottom: '15px', fontSize: '13px', lineHeight: 1.75, color: 'var(--tx-1)' }}>{score.summary}</p>
+          )}
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px 18px' }} className="score-dimensions">
+            {score.dimensions.map(item => (
+              <div key={item.label}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', gap: '8px', marginBottom: '6px', fontSize: '11px' }}>
+                  <span style={{ color: 'var(--tx-2)' }}>{item.label}</span>
+                  <span style={{ color: 'var(--ac)', fontWeight: 600 }}>{item.score}</span>
+                </div>
+                <div style={{ height: '5px', overflow: 'hidden', borderRadius: '999px', background: 'var(--bdr)' }}>
+                  <div style={{
+                    width: `${item.score}%`, height: '100%', borderRadius: '999px',
+                    background: 'linear-gradient(90deg, rgba(154,98,16,0.8), rgba(200,128,32,0.95))',
+                    transition: 'width 0.5s ease',
+                  }} />
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+
+      {(score.strengths.length > 0 || score.cautions.length > 0) && (
+        <div className="score-points" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px', marginTop: '20px' }}>
+          <div style={{ padding: '13px 14px', borderRadius: '12px', background: isDark ? 'rgba(34,197,94,0.055)' : 'rgba(34,197,94,0.045)', border: '1px solid rgba(34,197,94,0.15)' }}>
+            <div style={{ fontSize: '10px', letterSpacing: '0.18em', color: 'var(--tx-3)', marginBottom: '8px' }}>关系优势</div>
+            {score.strengths.map(item => <div key={item} style={{ fontSize: '11px', lineHeight: 1.65, color: 'var(--tx-2)' }}>✓ {item}</div>)}
+          </div>
+          <div style={{ padding: '13px 14px', borderRadius: '12px', background: isDark ? 'rgba(245,158,11,0.055)' : 'rgba(245,158,11,0.045)', border: '1px solid rgba(245,158,11,0.17)' }}>
+            <div style={{ fontSize: '10px', letterSpacing: '0.18em', color: 'var(--tx-3)', marginBottom: '8px' }}>需要留意</div>
+            {score.cautions.map(item => <div key={item} style={{ fontSize: '11px', lineHeight: 1.65, color: 'var(--tx-2)' }}>△ {item}</div>)}
+          </div>
+        </div>
+      )}
+    </section>
+  );
+}
+
 function AiContent({ text, streaming }: { text: string; streaming?: boolean }) {
-  const lines = text.split('\n');
+  const lines = removeScoreMarker(text).split('\n');
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
       {lines.map((line, i) => {
+        if (line.trimStart().startsWith('<!--SCORE:')) return null;
         const sectionMatch = line.match(/^\*\*【(.+?)】\*\*$/);
         if (sectionMatch) {
           return (
@@ -223,6 +355,11 @@ function buildCompatibilityPrompt(
   const nameA = formA.name.trim() || config.partyALabel;
   const nameB = formB.name.trim() || config.partyBLabel;
   const followUp = question?.trim();
+  const dimensionsJson = config.scoreDimensions.map(label => `{"label":"${label}","score":整数}`).join(',');
+
+  const scoreInstruction = followUp ? '' : `在正文报告之前，必须先单独输出一行评分标记，格式必须完全如下，不要使用 Markdown 代码块：
+<!--SCORE:{"overall":整数,"summary":"一句不超过35字的概括","dimensions":[${dimensionsJson}],"strengths":["优势1","优势2"],"cautions":["注意1","注意2"]}-->
+评分为 0—100 的 AI 盘面互动参考指数，不是概率或科学测量。评分必须结合双方盘面依据，四项分数不要机械相同。标记输出后空一行，再开始正文。`;
 
   return `你现在进行的是紫微斗数双人${config.label}合盘，而不是单人命盘解读。
 请严格基于两份紫微斗数命盘中的星曜、宫位互动关系进行分析，不要脱离盘面空谈，也不要套用泛泛的人际关系鸡汤。
@@ -234,6 +371,8 @@ ${JSON.stringify(chartB)}
 重点对照宫位：${config.focusPalaces}。
 分析任务：${config.analysisInstruction}
 请同时分析双方，不要只解读其中一方；不得给出宿命式、绝对化结论。
+
+${scoreInstruction}
 
 ${followUp ? `用户本次追问：${followUp}
 
@@ -255,6 +394,7 @@ export default function HemingPage() {
   const [formA, setFormA] = useState<BirthFormState | null>(null);
   const [formB, setFormB] = useState<BirthFormState | null>(null);
   const [analysis, setAnalysis] = useState('');
+  const [score, setScore] = useState<CompatibilityScore | null>(null);
   const [analyzing, setAnalyzing] = useState(false);
   const [question, setQuestion] = useState('');
   const [analysisError, setAnalysisError] = useState<string | null>(null);
@@ -266,6 +406,7 @@ export default function HemingPage() {
 
   const resetAnalysis = useCallback(() => {
     setAnalysis('');
+    setScore(null);
     setQuestion('');
     setAnalysisError(null);
     setFormError(null);
@@ -303,8 +444,10 @@ export default function HemingPage() {
       return;
     }
 
+    const isFollowUp = Boolean(requestedQuestion?.trim());
     setAnalyzing(true);
     setAnalysis('');
+    if (!isFollowUp) setScore(null);
 
     try {
       const currentChartA = chartA ?? generateChart(formToBirthInfo(formA));
@@ -336,6 +479,12 @@ export default function HemingPage() {
       let buffer = '';
       let serverDone = false;
 
+      const applyText = (nextText: string) => {
+        setAnalysis(nextText);
+        const parsedScore = parseScoreMarker(nextText);
+        if (parsedScore) setScore(parsedScore);
+      };
+
       const consumeLine = (rawLine: string) => {
         const line = rawLine.trimEnd();
         if (!line.startsWith('data:')) return;
@@ -355,7 +504,7 @@ export default function HemingPage() {
             ?? '';
           if (delta) {
             text += delta;
-            setAnalysis(text);
+            applyText(text);
           }
         } catch {
           // 忽略非 JSON 的 SSE 行。
@@ -374,7 +523,7 @@ export default function HemingPage() {
 
       buffer += decoder.decode();
       if (buffer.trim()) consumeLine(buffer);
-      if (!text.trim()) throw new Error('AI 服务未返回有效合盘内容');
+      if (!removeScoreMarker(text).trim()) throw new Error('AI 服务未返回有效合盘内容');
 
       setQuestion('');
       setTimeout(() => analysisRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 100);
@@ -473,7 +622,7 @@ export default function HemingPage() {
         }}>
           <div style={{ fontSize: '12px', fontWeight: 600, color: 'var(--ac)', marginBottom: '6px' }}>合盘使用提示</div>
           <p style={{ fontSize: '12px', lineHeight: 1.75, color: 'var(--tx-2)', marginBottom: '10px' }}>
-            合盘属于双人专项 AI 解读，后续将单独计费；当前内测期间暂不扣费。结果仅供传统文化学习、关系沟通与个人思考参考，不代表关系的确定结论，也不应作为婚姻、教育、合作或其他重大决定的唯一依据。
+            合盘属于双人专项 AI 解读，后续将单独计费；当前内测期间暂不扣费。结果与评分均仅供传统文化学习、关系沟通与个人思考参考，不代表关系的确定结论，也不应作为婚姻、教育、合作或其他重大决定的唯一依据。
           </p>
           <label style={{ display: 'flex', alignItems: 'flex-start', gap: '9px', cursor: 'pointer', fontSize: '12px', color: 'var(--tx-1)' }}>
             <input
@@ -517,7 +666,7 @@ export default function HemingPage() {
             <div style={{ textAlign: 'center', padding: '32px 0' }}>
               <div style={{ fontSize: '13px', color: 'var(--tx-3)', marginBottom: '24px', lineHeight: 1.7 }}>
                 填好双方出生信息并确认使用提示后，点击下方按钮<br />
-                AI 将按“{currentConfig.label}”方向对照双方完整命盘
+                AI 将生成互动参考指数和“{currentConfig.label}”详细报告
               </div>
               <button
                 onClick={() => runAnalysis()}
@@ -536,18 +685,19 @@ export default function HemingPage() {
             </div>
           )}
 
-          {analyzing && !analysis && (
+          {analyzing && !removeScoreMarker(analysis).trim() && (
             <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '10px', padding: '40px 0', color: 'var(--tx-3)', fontSize: '13px' }}>
               <div style={{
                 width: '14px', height: '14px',
                 border: '2px solid var(--bdr-med)', borderTopColor: 'var(--ac)',
                 borderRadius: '50%', animation: 'spin 0.8s linear infinite',
               }} />
-              正在生成{currentConfig.label}报告…
+              正在生成{currentConfig.label}评分与报告…
             </div>
           )}
 
-          {analysis && <AiContent text={analysis} streaming={analyzing} />}
+          {score && <ScoreCard score={score} typeLabel={currentConfig.label} isDark={isDark} />}
+          {removeScoreMarker(analysis).trim() && <AiContent text={analysis} streaming={analyzing} />}
 
           {analysisError && (
             <div style={{ padding: '14px 16px', borderRadius: '10px', border: '1px solid var(--bdr)', background: 'var(--bg-card)', fontSize: '13px', color: 'var(--tx-2)', marginTop: '12px' }}>
@@ -567,11 +717,11 @@ export default function HemingPage() {
 
           <div style={{ marginTop: '24px', paddingTop: '14px', borderTop: '1px solid var(--bdr)', textAlign: 'center' }}>
             <div style={{ fontSize: '10px', color: 'var(--ac)', letterSpacing: '0.12em', marginBottom: '3px' }}>AI 生成 · 仅供参考</div>
-            <div style={{ fontSize: '10px', color: 'var(--tx-3)', lineHeight: 1.6 }}>合盘内容不代表确定结果，请结合现实相处、专业意见与独立判断。</div>
+            <div style={{ fontSize: '10px', color: 'var(--tx-3)', lineHeight: 1.6 }}>互动指数不是概率或科学测量，请结合现实相处、专业意见与独立判断。</div>
           </div>
         </div>
 
-        {analysis && (
+        {removeScoreMarker(analysis).trim() && (
           <div style={{ display: 'flex', flexDirection: 'column', gap: '10px', marginTop: '16px' }}>
             <div style={{ fontSize: '11px', letterSpacing: '0.2em', color: 'var(--tx-3)', marginBottom: '4px' }}>针对本次{currentConfig.label}继续追问</div>
             <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
@@ -630,6 +780,9 @@ export default function HemingPage() {
           .heming-header-types { display: none; }
           .heming-question-row { flex-direction: column; }
           .heming-question-row button { width: 100%; }
+          .score-overview { grid-template-columns: 1fr !important; }
+          .score-dimensions { grid-template-columns: 1fr !important; }
+          .score-points { grid-template-columns: 1fr !important; }
         }
       `}</style>
     </div>
