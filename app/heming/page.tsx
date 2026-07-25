@@ -49,7 +49,7 @@ function AiContent({ text, streaming }: { text: string; streaming?: boolean }) {
   );
 }
 
-function isFormReady(form: BirthFormState | null): boolean {
+function isFormReady(form: BirthFormState | null): form is BirthFormState {
   if (!form || !form.year || !form.month || !form.day) return false;
   if (!form.unknownTime && (form.clockHour === '' || form.clockMinute === '')) return false;
 
