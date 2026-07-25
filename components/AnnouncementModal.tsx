@@ -7,6 +7,12 @@ const STAR_NAMES = [
   '紫微', '天机', '太阳', '武曲', '天同', '廉贞', '天府',
   '太阴', '贪狼', '巨门', '天相', '天梁', '七杀', '破军',
 ];
+const PALACE_BRANCHES: Record<number, string> = {
+  0: '巳', 1: '午', 2: '未', 3: '申',
+  4: '辰', 7: '酉',
+  8: '卯', 11: '戌',
+  12: '寅', 13: '丑', 14: '子', 15: '亥',
+};
 
 function findExactLeafElements(root: ParentNode, pattern: RegExp): HTMLElement[] {
   return Array.from(root.querySelectorAll<HTMLElement>('*')).filter(element => {
@@ -104,6 +110,44 @@ function connectHeroStarsToDetails() {
   heroGrid.insertAdjacentElement('afterend', hint);
 }
 
+function clarifyPalaceChartPreview() {
+  const caption = findExactLeafElements(document, /^(倪海夏排盘法|十二宫地支方位示意)$/).find(element => {
+    const container = element.parentElement;
+    return Boolean(container?.querySelector('div.grid.grid-cols-4'));
+  });
+  const container = caption?.parentElement;
+  const grid = container?.querySelector<HTMLElement>('div.grid.grid-cols-4');
+  if (!caption || !grid) return;
+
+  grid.dataset.chartPreviewGrid = 'true';
+  const cells = Array.from(grid.children).filter(
+    element => !(element instanceof HTMLElement && element.dataset.chartCenterLabel === 'true'),
+  ) as HTMLElement[];
+
+  if (cells.length < 16) return;
+
+  cells.slice(0, 16).forEach((cell, index) => {
+    const branch = PALACE_BRANCHES[index];
+    if (!branch) return;
+
+    cell.dataset.chartBranchCell = 'true';
+    cell.setAttribute('aria-label', `${branch}位`);
+    const expected = `<span data-chart-branch-symbol="true">${branch}</span>`;
+    if (cell.innerHTML !== expected) cell.innerHTML = expected;
+  });
+
+  if (!grid.querySelector('[data-chart-center-label="true"]')) {
+    const centerLabel = document.createElement('div');
+    centerLabel.dataset.chartCenterLabel = 'true';
+    centerLabel.innerHTML = '<strong>十二宫</strong><span>随命宫轮转</span>';
+    grid.appendChild(centerLabel);
+  }
+
+  if ((caption.textContent ?? '').trim() !== '十二宫地支方位示意') {
+    caption.textContent = '十二宫地支方位示意';
+  }
+}
+
 /**
  * 历史活动公告已经下线。
  *
@@ -111,7 +155,8 @@ function connectHeroStarsToDetails() {
  * 1. 将写死的月份替换为长期有效的开放状态；
  * 2. 移除旧“5/1—5/8 全免费”活动卡片；
  * 3. 将首页 AI 服务商文案同步为当前实际使用的 DeepSeek；
- * 4. 将首屏十四主星入口连接到下方详细解释区。
+ * 4. 将首屏十四主星入口连接到下方详细解释区；
+ * 5. 将空白排盘装饰改成可理解的十二宫地支方位示意。
  */
 export default function AnnouncementModal() {
   useLayoutEffect(() => {
@@ -120,6 +165,7 @@ export default function AnnouncementModal() {
       removeExpiredCampaignCards();
       correctAiProviderCopy();
       connectHeroStarsToDetails();
+      clarifyPalaceChartPreview();
     };
 
     applyMaintenance();
@@ -171,6 +217,55 @@ export default function AnnouncementModal() {
       [data-hero-star-hint="true"]::after {
         content: ' ↓';
         color: var(--ac, #b8892a);
+      }
+
+      [data-chart-preview-grid="true"] {
+        position: relative;
+      }
+
+      [data-chart-branch-cell="true"] {
+        font-size: 18px !important;
+        font-weight: 600;
+        color: var(--ac, #b8892a) !important;
+      }
+
+      [data-chart-branch-symbol="true"] {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        width: 100%;
+        height: 100%;
+      }
+
+      [data-chart-center-label="true"] {
+        position: absolute;
+        left: calc(25% + 3px);
+        top: calc(25% + 3px);
+        width: calc(50% - 6px);
+        height: calc(50% - 6px);
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        gap: 5px;
+        border-radius: 10px;
+        border: 1px solid var(--bdr, rgba(184, 146, 42, 0.18));
+        background: var(--bg-card, rgba(255, 255, 255, 0.04));
+        color: var(--tx-2, rgba(220, 230, 245, 0.78));
+        pointer-events: none;
+        text-align: center;
+      }
+
+      [data-chart-center-label="true"] strong {
+        font-size: 13px;
+        letter-spacing: 0.14em;
+        color: var(--ac, #b8892a);
+      }
+
+      [data-chart-center-label="true"] span {
+        font-size: 9px;
+        letter-spacing: 0.08em;
+        color: var(--tx-3, rgba(220, 230, 245, 0.55));
       }
     `}</style>
   );
