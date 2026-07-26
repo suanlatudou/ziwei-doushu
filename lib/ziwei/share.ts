@@ -55,8 +55,8 @@ export function formToBirthInfo(form: BirthFormState): BirthInfo {
 /**
  * BirthFormState → URLSearchParams（用于分享链接）
  *
- * 分享链接只保留重新排盘所必需的信息：年月日、时间和性别。
- * 姓名、出生省市和经度属于个人信息，不再写入 URL；打开分享链接后可由接收者自行补充。
+ * 姓名、省份和城市不写入 URL。为保证接收者重新排出的真太阳时命盘与原盘一致，
+ * 仅保留四舍五入到 0.1° 的经度；这个精度足以校正时辰，同时不会直接暴露城市名称。
  */
 export function formToSearchParams(form: BirthFormState): URLSearchParams {
   const p = new URLSearchParams();
@@ -69,6 +69,14 @@ export function formToSearchParams(form: BirthFormState): URLSearchParams {
     p.set('h', form.clockHour);
     p.set('mi', form.clockMinute);
   }
+
+  if (Number.isFinite(form.longitude)) {
+    const roundedLongitude = Math.round(form.longitude * 10) / 10;
+    if (Math.abs(roundedLongitude - 120) >= 0.05) {
+      p.set('lo', String(roundedLongitude));
+    }
+  }
+
   p.set('g', form.gender === 'male' ? 'm' : 'f');
   return p;
 }
@@ -79,6 +87,12 @@ export function searchParamsToForm(params: URLSearchParams): Partial<BirthFormSt
   const month = params.get('m');
   const day = params.get('d');
   if (!year || !month || !day) return null;
+
+  const parsedLongitude = Number.parseFloat(params.get('lo') || '120');
+  const longitude = Number.isFinite(parsedLongitude) && parsedLongitude >= -180 && parsedLongitude <= 180
+    ? parsedLongitude
+    : 120;
+
   return {
     name: '',
     year,
@@ -89,7 +103,7 @@ export function searchParamsToForm(params: URLSearchParams): Partial<BirthFormSt
     clockMinute: params.get('mi') || '0',
     province: '',
     city: '',
-    longitude: 120,
+    longitude,
     gender: params.get('g') === 'f' ? 'female' : 'male',
   };
 }
