@@ -4,9 +4,9 @@ import {
   type AiMode,
 } from './knowledge';
 import {
+  chargeQuota,
   getCachedResponse,
   purgeExpiredCache,
-  chargeQuota,
   recordUsage,
   refundQuota,
   saveCachedResponse,
@@ -25,6 +25,7 @@ interface ExecutionContextLike {
 export interface Env {
   DEEPSEEK_API_KEY: string;
   DEEPSEEK_MODEL?: string;
+  DEEPSEEK_THINKING?: string;
   ALLOWED_ORIGINS?: string;
   TURNSTILE_SECRET?: string;
   FREE_DAILY_LIMIT?: string;
@@ -42,27 +43,35 @@ interface ChatMessage {
 }
 
 interface InterpretRequest {
-  chart?: unknown;
+  chart: unknown;
   secondaryChart?: unknown;
-  mode?: AiMode;
-  messages?: ChatMessage[];
+  mode: AiMode;
+  messages: ChatMessage[];
   turnstileToken?: string;
   clientId?: string;
-  cache?: boolean;
+  cache: boolean;
 }
 
 const DEFAULT_ALLOWED_ORIGINS = [
   'https://ziwei-doushu-5xd.pages.dev',
-  'https://wdyziweidoushu666.com',
+  'http://localhost:3000',
+  'http://127.0.0.1:3000',
 ];
-const MAX_BODY_BYTES = 200_000;
-const MAX_CHART_CHARS = 160_000;
+const PAGES_PREVIEW_SUFFIX = '.ziwei-doushu-5xd.pages.dev';
+const MAX_BODY_BYTES = 320_000;
+const MAX_CHART_CHARS = 180_000;
 const MAX_MESSAGES = 12;
-const MAX_MESSAGE_CHARS = 8_000;
+const MAX_MESSAGE_CHARS = 12_000;
 const DEFAULT_FREE_DAILY_LIMIT = 3;
 const DEFAULT_COMPATIBILITY_COST = 2;
 const DEFAULT_CACHE_TTL_SECONDS = 604_800;
 const MAX_CACHE_TTL_SECONDS = 2_592_000;
+
+const NO_CHARGE: ChargeResult = {
+  allowed: true,
+  kind: 'none',
+  units: 0,
+};
 
 function jsonResponse(data: unknown, status: number, headers: HeadersInit): Response {
   return Response.json(data, { status, headers });
@@ -82,21 +91,35 @@ function parsePositiveInteger(
 function parseAllowedOrigins(env: Env): Set<string> {
   const configured = env.ALLOWED_ORIGINS
     ?.split(',')
-    .map(origin => origin.trim())
-    .filter(Boolean);
-  return new Set(configured?.length ? configured : DEFAULT_ALLOWED_ORIGINS);
+    .map(origin => origin.trim().replace(/\/$/, ''))
+    .filter(Boolean) ?? [];
+  return new Set([...DEFAULT_ALLOWED_ORIGINS, ...configured]);
+}
+
+function isAllowedOrigin(origin: string | null, allowedOrigins: Set<string>): boolean {
+  if (!origin) return false;
+  const normalized = origin.replace(/\/$/, '');
+  if (allowedOrigins.has(normalized)) return true;
+
+  try {
+    const url = new URL(normalized);
+    return url.protocol === 'https:'
+      && url.hostname.endsWith(PAGES_PREVIEW_SUFFIX);
+  } catch {
+    return false;
+  }
 }
 
 function corsHeaders(origin: string | null, allowedOrigins: Set<string>): Record<string, string> {
   const headers: Record<string, string> = {
     'Access-Control-Allow-Headers': 'content-type, x-ziwei-client',
     'Access-Control-Allow-Methods': 'POST, OPTIONS',
-    'Access-Control-Expose-Headers': 'x-ai-cache, x-ai-remaining-free, x-ai-remaining-credits',
+    'Access-Control-Expose-Headers': 'x-ai-cache, x-ai-quota, x-ai-remaining-free, x-ai-remaining-credits',
     'Access-Control-Max-Age': '86400',
     Vary: 'Origin',
   };
 
-  if (origin && allowedOrigins.has(origin)) {
+  if (origin && isAllowedOrigin(origin, allowedOrigins)) {
     headers['Access-Control-Allow-Origin'] = origin;
   }
 
@@ -165,15 +188,14 @@ async function sha256Hex(value: string): Promise<string> {
   ).join('');
 }
 
-async function resolveClientId(request: Request, body: InterpretRequest): Promise<string> {
-  const explicitClient = request.headers.get('X-Ziwei-Client') || body.clientId;
-  if (explicitClient && /^[a-zA-Z0-9._:-]{8,128}$/.test(explicitClient)) {
-    return explicitClient;
-  }
-
+async function resolveSubjectKey(request: Request, body: InterpretRequest): Promise<string> {
   const ip = request.headers.get('CF-Connecting-IP') || 'unknown';
   const userAgent = request.headers.get('User-Agent') || 'unknown';
-  return `guest:${await sha256Hex(`${ip}|${userAgent}`)}`;
+
+  // 浏览器生成的 clientId 只能用于无 CF-IP 的本地开发兜底，不能作为线上额度主体，
+  // 否则用户清空 localStorage 或随机生成 ID 即可绕过次数和限流。
+  const localFallback = ip === 'unknown' ? (body.clientId || 'anonymous') : '';
+  return `subject:${await sha256Hex(`${ip}|${userAgent}|${localFallback}`)}`;
 }
 
 function stripChartIdentity(value: unknown): unknown {
@@ -217,8 +239,8 @@ function stableJson(value: unknown): string {
 
 async function makeCacheKey(
   body: InterpretRequest,
-  question: string,
   model: string,
+  thinkingType: 'enabled' | 'disabled',
 ): Promise<string> {
   return sha256Hex(stableJson({
     version: KNOWLEDGE_VERSION,
@@ -227,8 +249,10 @@ async function makeCacheKey(
     secondaryChart: body.mode === 'compatibility'
       ? stripChartIdentity(body.secondaryChart)
       : undefined,
-    question,
+    // 必须包含完整对话，而不是只放最后一个问题；否则不同追问上下文会错误复用缓存。
+    messages: body.messages,
     model,
+    thinkingType,
   }));
 }
 
@@ -254,7 +278,8 @@ function buildSystemMessage(
   return {
     role: 'system',
     content: `你是严谨的紫微斗数传统文化解读助手。${modeInstruction}
-必须以系统提供的结构化盘面和知识检索结果为依据，不得虚构盘中不存在的信息；如果证据不足，应明确说明。避免宿命化和绝对化措辞。
+必须以系统提供的结构化盘面和知识检索结果为依据，不得虚构盘中不存在的信息；如果证据不足，应明确说明。
+古籍中若出现“必然”“生离死别”“刑克”“灾祸”等绝对或恐吓性措辞，只能作为历史术语解释，不得照搬为现实结论。必须改写为审慎、条件化、可验证的表达。
 内容仅供传统文化学习和个人思考，不得替代医疗、法律、投资、婚姻、教育或其他重大决策。
 
 【结构化命盘数据】
@@ -355,7 +380,7 @@ async function collectDeepSeekStream(stream: ReadableStream<Uint8Array>): Promis
 
 function sseHeaders(
   baseHeaders: Record<string, string>,
-  cacheStatus: 'HIT' | 'MISS',
+  cacheStatus: 'HIT' | 'MISS' | 'BYPASS',
   charge?: ChargeResult,
 ): Record<string, string> {
   const headers: Record<string, string> = {
@@ -365,6 +390,7 @@ function sseHeaders(
     Connection: 'keep-alive',
     'X-Content-Type-Options': 'nosniff',
     'X-AI-Cache': cacheStatus,
+    'X-AI-Quota': charge?.kind ?? 'none',
   };
 
   if (charge?.remainingFree !== undefined) {
@@ -389,7 +415,7 @@ function cachedSseResponse(text: string, headers: Record<string, string>): Respo
 async function finalizeCompletion(options: {
   db: D1Database;
   stream: ReadableStream<Uint8Array>;
-  clientId: string;
+  subjectKey: string;
   mode: AiMode;
   cacheKey: string;
   cacheEnabled: boolean;
@@ -399,7 +425,7 @@ async function finalizeCompletion(options: {
   const {
     db,
     stream,
-    clientId,
+    subjectKey,
     mode,
     cacheKey,
     cacheEnabled,
@@ -412,7 +438,7 @@ async function finalizeCompletion(options: {
     fullText = await collectDeepSeekStream(stream);
   } catch (error) {
     console.error('DeepSeek stream collection failed', error);
-    await refundQuota(db, clientId, charge).catch(refundError => {
+    await refundQuota(db, subjectKey, charge).catch(refundError => {
       console.error('Quota refund failed', refundError);
     });
     return;
@@ -420,7 +446,7 @@ async function finalizeCompletion(options: {
 
   if (!fullText.trim()) {
     console.error('DeepSeek stream completed without content');
-    await refundQuota(db, clientId, charge).catch(refundError => {
+    await refundQuota(db, subjectKey, charge).catch(refundError => {
       console.error('Quota refund failed', refundError);
     });
     return;
@@ -433,7 +459,7 @@ async function finalizeCompletion(options: {
     });
   }
 
-  await recordUsage(db, clientId, mode, false, charge).catch(error => {
+  await recordUsage(db, subjectKey, mode, false, charge).catch(error => {
     console.error('AI usage recording failed', error);
   });
 }
@@ -450,7 +476,7 @@ export default {
     const headers = corsHeaders(origin, allowedOrigins);
 
     if (request.method === 'OPTIONS') {
-      if (!origin || !allowedOrigins.has(origin)) {
+      if (!origin || !isAllowedOrigin(origin, allowedOrigins)) {
         return new Response(null, { status: 403, headers });
       }
       return new Response(null, { status: 204, headers });
@@ -471,8 +497,11 @@ export default {
     if (request.method !== 'POST') {
       return jsonResponse({ error: '仅支持 POST 请求' }, 405, headers);
     }
-    if (origin && !allowedOrigins.has(origin)) {
+    if (origin && !isAllowedOrigin(origin, allowedOrigins)) {
       return jsonResponse({ error: '当前来源未获授权' }, 403, headers);
+    }
+    if (!env.DEEPSEEK_API_KEY) {
+      return jsonResponse({ error: 'AI 服务尚未配置' }, 503, headers);
     }
 
     const declaredLength = Number(request.headers.get('content-length') || 0);
@@ -504,52 +533,45 @@ export default {
       }
     }
 
-    const clientId = await resolveClientId(request, body);
+    const subjectKey = await resolveSubjectKey(request, body);
     if (env.RATE_LIMITER) {
-      const { success } = await env.RATE_LIMITER.limit({ key: `client:${clientId}` });
+      const { success } = await env.RATE_LIMITER.limit({ key: subjectKey });
       if (!success) {
         return jsonResponse({ error: '请求过于频繁，请稍后再试' }, 429, headers);
       }
     }
 
-    if (!env.DB) {
-      return jsonResponse({
-        error: '次数服务尚未配置，请先绑定 D1 数据库',
-        code: 'DATABASE_NOT_CONFIGURED',
-      }, 503, headers);
-    }
-
     const db = env.DB;
-    const mode = body.mode ?? 'chart';
+    const mode = body.mode;
     const model = env.DEEPSEEK_MODEL || 'deepseek-v4-flash';
-    const question = [...(body.messages ?? [])]
+    const thinkingType: 'enabled' | 'disabled' = env.DEEPSEEK_THINKING === 'enabled'
+      ? 'enabled'
+      : 'disabled';
+    const question = [...body.messages]
       .reverse()
       .find(message => message.role === 'user')
       ?.content.trim() ?? '';
-    const cacheKey = await makeCacheKey(body, question, model);
+    const cacheKey = await makeCacheKey(body, model, thinkingType);
     const nowSeconds = Math.floor(Date.now() / 1000);
 
-    if (Math.random() < 0.01) {
+    if (db && Math.random() < 0.01) {
       context.waitUntil(purgeExpiredCache(db, nowSeconds).catch(error => {
         console.error('Expired cache purge failed', error);
       }));
     }
 
-    if (body.cache !== false) {
-      let cached: string | null;
+    if (db && body.cache) {
       try {
-        cached = await getCachedResponse(db, cacheKey, mode, nowSeconds);
+        const cached = await getCachedResponse(db, cacheKey, mode, nowSeconds);
+        if (cached) {
+          context.waitUntil(recordUsage(db, subjectKey, mode, true, NO_CHARGE).catch(error => {
+            console.error('Cache-hit usage recording failed', error);
+          }));
+          return cachedSseResponse(cached, sseHeaders(headers, 'HIT', NO_CHARGE));
+        }
       } catch (error) {
-        console.error('AI cache read failed', error);
-        return jsonResponse({ error: '次数服务暂时不可用，请稍后重试' }, 503, headers);
-      }
-
-      if (cached) {
-        const noCharge: ChargeResult = { allowed: true, kind: 'none', units: 0 };
-        context.waitUntil(recordUsage(db, clientId, mode, true, noCharge).catch(error => {
-          console.error('Cache-hit usage recording failed', error);
-        }));
-        return cachedSseResponse(cached, sseHeaders(headers, 'HIT'));
+        // 缓存故障不应让 AI 服务整体不可用。
+        console.error('AI cache read failed; continuing without cache', error);
       }
     }
 
@@ -564,32 +586,29 @@ export default {
       100,
     );
 
-    let charge: ChargeResult;
-    try {
-      charge = await chargeQuota(
-        db,
-        clientId,
-        mode,
-        freeDailyLimit,
-        compatibilityCost,
-      );
-    } catch (error) {
-      console.error('Quota charge failed', error);
-      return jsonResponse({ error: '次数服务暂时不可用，请稍后重试' }, 503, headers);
-    }
+    let charge: ChargeResult = NO_CHARGE;
+    if (db) {
+      try {
+        charge = await chargeQuota(
+          db,
+          subjectKey,
+          mode,
+          freeDailyLimit,
+          compatibilityCost,
+        );
+      } catch (error) {
+        console.error('Quota charge failed', error);
+        return jsonResponse({ error: '次数服务暂时不可用，请稍后重试' }, 503, headers);
+      }
 
-    if (!charge.allowed) {
-      return jsonResponse({
-        error: '今日免费次数和付费次数均已用完，请充值次数或开通 VIP',
-        code: 'INSUFFICIENT_QUOTA',
-        remainingFree: charge.remainingFree ?? 0,
-        remainingCredits: charge.remainingCredits ?? 0,
-      }, 402, headers);
-    }
-
-    if (!env.DEEPSEEK_API_KEY) {
-      await refundQuota(db, clientId, charge);
-      return jsonResponse({ error: 'AI 服务尚未配置' }, 503, headers);
+      if (!charge.allowed) {
+        return jsonResponse({
+          error: '今日免费次数和付费次数均已用完，请充值次数或开通 VIP',
+          code: 'INSUFFICIENT_QUOTA',
+          remainingFree: charge.remainingFree ?? 0,
+          remainingCredits: charge.remainingCredits ?? 0,
+        }, 402, headers);
+      }
     }
 
     let systemMessage: ChatMessage;
@@ -603,7 +622,7 @@ export default {
       systemMessage = buildSystemMessage(body, knowledgeContext);
     } catch (error) {
       console.error('Knowledge or chart preparation failed', error);
-      await refundQuota(db, clientId, charge);
+      if (db) await refundQuota(db, subjectKey, charge).catch(() => undefined);
       return jsonResponse({ error: '命盘数据过大或无法解析' }, 413, headers);
     }
 
@@ -618,22 +637,30 @@ export default {
         body: JSON.stringify({
           model,
           stream: true,
-          temperature: 0.45,
+          temperature: 0.4,
           max_tokens: 4096,
-          messages: [systemMessage, ...(body.messages ?? [])],
+          thinking: { type: thinkingType },
+          messages: [systemMessage, ...body.messages],
         }),
       });
     } catch (error) {
       console.error('DeepSeek request failed before response', error);
-      await refundQuota(db, clientId, charge);
+      if (db) await refundQuota(db, subjectKey, charge).catch(() => undefined);
       return jsonResponse({ error: 'AI 服务暂时不可用，请稍后重试' }, 502, headers);
     }
 
     if (!upstream.ok || !upstream.body) {
       const detail = await upstream.text().catch(() => '');
       console.error('DeepSeek request failed', upstream.status, detail.slice(0, 1000));
-      await refundQuota(db, clientId, charge);
+      if (db) await refundQuota(db, subjectKey, charge).catch(() => undefined);
       return jsonResponse({ error: 'AI 服务暂时不可用，请稍后重试' }, 502, headers);
+    }
+
+    if (!db) {
+      return new Response(transformDeepSeekStream(upstream.body), {
+        status: 200,
+        headers: sseHeaders(headers, 'BYPASS', charge),
+      });
     }
 
     const [clientStream, auditStream] = upstream.body.tee();
@@ -645,10 +672,10 @@ export default {
     context.waitUntil(finalizeCompletion({
       db,
       stream: auditStream,
-      clientId,
+      subjectKey,
       mode,
       cacheKey,
-      cacheEnabled: body.cache !== false,
+      cacheEnabled: body.cache,
       cacheTtlSeconds,
       charge,
     }));
