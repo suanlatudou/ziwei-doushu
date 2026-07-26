@@ -1,16 +1,17 @@
 'use client';
-import { useState } from 'react';
-import BirthForm from '@/components/BirthForm';
+import { useRef, useState } from 'react';
+import BirthForm, { type BirthFormState } from '@/components/BirthForm';
 import ChartBoard from '@/components/ChartBoard';
 import InsightPanel from '@/components/InsightPanel';
 import AiConsentGate from '@/components/AiConsentGate';
 import { generateChart } from '@/lib/ziwei/algorithm';
 import { normalizeBirthForm } from '@/lib/ziwei/birth-normalize';
-import type { BirthInfo, ZiweiChart, Palace } from '@/lib/ziwei/types';
+import type { ZiweiChart, Palace } from '@/lib/ziwei/types';
 
 export default function ChartPage() {
   const [chart, setChart] = useState<ZiweiChart | null>(null);
   const [selectedPalace, setSelectedPalace] = useState<Palace | null>(null);
+  const latestForm = useRef<BirthFormState | null>(null);
 
   if (!chart) {
     return (
@@ -20,7 +21,13 @@ export default function ChartPage() {
           输入出生年月日时，生成完整紫微命盘。
         </p>
         <BirthForm
-          onSubmit={(info: BirthInfo) => setChart(generateChart(info))}
+          onFormSave={form => {
+            latestForm.current = form;
+          }}
+          onSubmit={() => {
+            if (!latestForm.current) return;
+            setChart(generateChart(normalizeBirthForm(latestForm.current)));
+          }}
         />
       </main>
     );
