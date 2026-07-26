@@ -18,24 +18,29 @@ export function calcTrueSolarBranch(clockHour: number, clockMinute: number, long
  * 这与「时辰支同为子(0)」并不冲突——子时分早晚两段，需要在日期上区分。
  */
 export function formToBirthInfo(form: BirthFormState): BirthInfo {
+  if (form.unknownTime) {
+    throw new Error('出生时辰未知，无法可靠定位命宫、身宫和十二宫。请补充出生时间后再排盘或合盘。');
+  }
+
   let y = parseInt(form.year) || 0;
   let m = parseInt(form.month) || 0;
   let d = parseInt(form.day) || 0;
 
   // 晚子时（23:00-23:59）按次日处理：用 Date 对象自动处理月末/年末进位
-  if (!form.unknownTime) {
-    const clockHour = parseInt(form.clockHour) || 0;
-    if (clockHour === 23 && y > 0 && m > 0 && d > 0) {
-      const next = new Date(y, m - 1, d + 1);
-      y = next.getFullYear();
-      m = next.getMonth() + 1;
-      d = next.getDate();
-    }
+  const clockHour = parseInt(form.clockHour) || 0;
+  if (clockHour === 23 && y > 0 && m > 0 && d > 0) {
+    const next = new Date(y, m - 1, d + 1);
+    y = next.getFullYear();
+    m = next.getMonth() + 1;
+    d = next.getDate();
   }
 
-  const hour = form.unknownTime
-    ? 0
-    : calcTrueSolarBranch(parseInt(form.clockHour) || 0, parseInt(form.clockMinute) || 0, form.longitude);
+  const hour = calcTrueSolarBranch(
+    clockHour,
+    parseInt(form.clockMinute) || 0,
+    form.longitude,
+  );
+
   return {
     year: y, month: m, day: d,
     hour,
