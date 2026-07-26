@@ -2,6 +2,7 @@
 import { useState, useRef, useEffect } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import type { ZiweiChart, Palace } from '@/lib/ziwei/types';
+import { streamAiInterpret } from '@/lib/ai/client';
 import type { TimeView } from './TimeNav';
 
 interface Message {
@@ -275,42 +276,35 @@ ${selectedSiHua.starName}化${selectedSiHua.siHua}落在【${palaceName}】，�
   }, [selectedSiHua]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const streamResponse = async (apiMessages: { role: 'user' | 'assistant'; content: string }[]) => {
+    setMessages(prev => [...prev, { role: 'assistant', content: '' }]);
+
     try {
-      const res = await fetch('https://ziwei-ai-api.730333227.workers.dev/api/interpret', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ chart, messages: apiMessages }),
+      await streamAiInterpret({
+        chart,
+        messages: apiMessages,
+        onDelta: (_delta, fullText) => {
+          setMessages(prev => {
+            const updated = [...prev];
+            updated[updated.length - 1] = { role: 'assistant', content: fullText };
+            return updated;
+          });
+        },
       });
-      if (!res.ok) throw new Error('请求失败');
-      if (!res.body) throw new Error('无响应流');
+    } catch (error) {
+      const errorMessage = error instanceof Error
+        ? error.message
+        : '解读失败，请稍后重试。';
 
-      const reader = res.body.getReader();
-      const decoder = new TextDecoder();
-      let assistantText = '';
-
-      setMessages(prev => [...prev, { role: 'assistant', content: '' }]);
-
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        const chunk = decoder.decode(value, { stream: true });
-        for (const line of chunk.split('\n')) {
-          if (!line.startsWith('data: ')) continue;
-          const data = line.slice(6);
-          if (data === '[DONE]') break;
-          try {
-            const delta = JSON.parse(data).delta?.text ?? '';
-            assistantText += delta;
-            setMessages(prev => {
-              const updated = [...prev];
-              updated[updated.length - 1] = { role: 'assistant', content: assistantText };
-              return updated;
-            });
-          } catch { /* skip */ }
+      setMessages(prev => {
+        const updated = [...prev];
+        const last = updated[updated.length - 1];
+        if (last?.role === 'assistant' && !last.content) {
+          updated[updated.length - 1] = { role: 'assistant', content: errorMessage };
+        } else {
+          updated.push({ role: 'assistant', content: errorMessage });
         }
-      }
-    } catch {
-      setMessages(prev => [...prev, { role: 'assistant', content: '解读失败，请稍后重试。' }]);
+        return updated;
+      });
     } finally {
       setLoading(false);
       loadingRef.current = false;
