@@ -52,10 +52,14 @@ export function formToBirthInfo(form: BirthFormState): BirthInfo {
   };
 }
 
-/** BirthFormState → URLSearchParams（用于分享链接） */
+/**
+ * BirthFormState → URLSearchParams（用于分享链接）
+ *
+ * 分享链接只保留重新排盘所必需的信息：年月日、时间和性别。
+ * 姓名、出生省市和经度属于个人信息，不再写入 URL；打开分享链接后可由接收者自行补充。
+ */
 export function formToSearchParams(form: BirthFormState): URLSearchParams {
   const p = new URLSearchParams();
-  if (form.name) p.set('n', form.name);
   p.set('y', form.year);
   p.set('m', form.month);
   p.set('d', form.day);
@@ -65,9 +69,6 @@ export function formToSearchParams(form: BirthFormState): URLSearchParams {
     p.set('h', form.clockHour);
     p.set('mi', form.clockMinute);
   }
-  if (form.province) p.set('p', form.province);
-  if (form.city) p.set('c', form.city);
-  if (form.longitude && form.longitude !== 120) p.set('lo', String(form.longitude));
   p.set('g', form.gender === 'male' ? 'm' : 'f');
   return p;
 }
@@ -79,16 +80,16 @@ export function searchParamsToForm(params: URLSearchParams): Partial<BirthFormSt
   const day = params.get('d');
   if (!year || !month || !day) return null;
   return {
-    name: params.get('n') || '',
+    name: '',
     year,
     month,
     day,
     unknownTime: params.get('u') === '1',
     clockHour: params.get('h') || '8',
     clockMinute: params.get('mi') || '0',
-    province: params.get('p') || '',
-    city: params.get('c') || '',
-    longitude: parseFloat(params.get('lo') || '120'),
+    province: '',
+    city: '',
+    longitude: 120,
     gender: params.get('g') === 'f' ? 'female' : 'male',
   };
 }
