@@ -1,0 +1,11 @@
+name = "ziwei-ai-api"
+main = "src/index.ts"
+compatibility_date = "2026-07-26"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "ziwei-ai-db"
+database_id = "YOUR_D1_DATABASE_ID"
+
+[vars]
+DEEPSEEK_MODEL = "deepseek-v4-flash"
