@@ -1,8 +1,7 @@
 import type { MetadataRoute } from 'next';
+import { SITE_URL } from '@/lib/site';
 
 export const dynamic = 'force-static';
-
-const BASE_URL = 'https://ziwei-doushu-5xd.pages.dev';
 
 export default function robots(): MetadataRoute.Robots {
   return {
@@ -13,7 +12,7 @@ export default function robots(): MetadataRoute.Robots {
         disallow: ['/api/', '/preview-versions/'],
       },
     ],
-    sitemap: `${BASE_URL}/sitemap.xml`,
-    host: BASE_URL,
+    sitemap: `${SITE_URL}/sitemap.xml`,
+    host: SITE_URL,
   };
 }
