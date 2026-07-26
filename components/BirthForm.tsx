@@ -30,6 +30,8 @@ interface BirthFormProps {
 }
 
 const SHICHEN_NAMES = ['子', '丑', '寅', '卯', '辰', '巳', '午', '未', '申', '酉', '戌', '亥'];
+const MIN_BIRTH_YEAR = 1900;
+const CURRENT_YEAR = new Date().getFullYear();
 
 /** 根据北京时间 + 经度计算真太阳时时辰支 (0-11) */
 function calcTrueSolarBranch(clockHour: number, clockMinute: number, longitude: number): number {
@@ -79,17 +81,14 @@ export default function BirthForm({ onSubmit, loading, initialData, onFormSave, 
     return prov ? prov.cities : [];
   }, [form.province]);
 
-  const branch = useMemo(() => {
-    if (form.unknownTime) return 0;
-    return calcTrueSolarBranch(
-      parseInt(form.clockHour) || 0,
-      parseInt(form.clockMinute) || 0,
-      form.longitude,
-    );
-  }, [form.clockHour, form.clockMinute, form.longitude, form.unknownTime]);
+  const branch = useMemo(() => calcTrueSolarBranch(
+    parseInt(form.clockHour) || 0,
+    parseInt(form.clockMinute) || 0,
+    form.longitude,
+  ), [form.clockHour, form.clockMinute, form.longitude]);
 
   const offsetMin = Math.round((form.longitude - 120) * 4);
-  const shichenInfo = SHICHEN[branch];
+  const shichenInfo = form.unknownTime ? undefined : SHICHEN[branch];
 
   // ─── 校验逻辑 ───────────────────────────────────────────
   const y = parseInt(form.year) || 0;
@@ -98,7 +97,7 @@ export default function BirthForm({ onSubmit, loading, initialData, onFormSave, 
 
   const errors = {
     year: !form.year ? '请选择出生年份'
-      : y < 1900 || y > 2026 ? '年份范围：1900–2026'
+      : y < MIN_BIRTH_YEAR || y > CURRENT_YEAR ? `年份范围：${MIN_BIRTH_YEAR}–${CURRENT_YEAR}`
       : '',
     month: !form.month ? '请选择月份' : '',
     day: !form.day ? '请选择日期'
@@ -111,18 +110,18 @@ export default function BirthForm({ onSubmit, loading, initialData, onFormSave, 
   const steps = [
     !!form.year && !!form.month && !!form.day && !errors.year && !errors.month && !errors.day,
     !!form.province && !!form.city,
-    form.unknownTime || (!!form.clockHour && !!form.clockMinute),
+    !form.unknownTime && !!form.clockHour && !!form.clockMinute,
     true, // 性别有默认值
   ];
   const completedSteps = steps.filter(Boolean).length;
 
   // ─── Summary chip：全部必填完成后显示 ───────────────────
-  const showSummary = steps[0] && steps[2] && !hasError;
+  const showSummary = steps[0] && !hasError;
   const summaryText = showSummary
     ? [
         `${y}年${m}月${d}日`,
         form.city || (form.province ? form.province : ''),
-        form.unknownTime ? '时辰不详' : `${SHICHEN_NAMES[branch]}时`,
+        form.unknownTime ? '时辰不详（暂不能完整起盘）' : `${SHICHEN_NAMES[branch]}时`,
         form.gender === 'male' ? '男' : '女',
       ].filter(Boolean).join(' · ')
     : '';
@@ -143,7 +142,7 @@ export default function BirthForm({ onSubmit, loading, initialData, onFormSave, 
     e.preventDefault();
     setSubmitAttempted(true);
     setTouched({ year: true, month: true, day: true });
-    if (hasError) return;
+    if (hasError || form.unknownTime) return;
     onFormSave?.({ ...form });
     onSubmit({ year: y, month: m, day: d, hour: branch, gender: form.gender, name: form.name || undefined, province: form.province || undefined, city: form.city || undefined, longitude: form.province ? form.longitude : undefined });
   };
@@ -165,6 +164,9 @@ export default function BirthForm({ onSubmit, loading, initialData, onFormSave, 
   const summaryBg = isDark ? 'rgba(37,99,235,0.12)' : 'rgba(37,99,235,0.07)';
   const summaryBorder = isDark ? 'rgba(37,99,235,0.35)' : 'rgba(37,99,235,0.25)';
   const summaryClr = isDark ? 'rgba(147,197,253,0.9)' : 'rgba(37,99,235,0.85)';
+  const warningBg = isDark ? 'rgba(245,158,11,0.08)' : 'rgba(245,158,11,0.07)';
+  const warningBorder = isDark ? 'rgba(245,158,11,0.28)' : 'rgba(180,110,10,0.25)';
+  const warningText = isDark ? 'rgba(253,211,120,0.92)' : '#8a5408';
 
   const inputStyle = {
     background: inputBg,
@@ -199,6 +201,7 @@ export default function BirthForm({ onSubmit, loading, initialData, onFormSave, 
   }
 
   const showErr = (field: string) => touched[field] || submitAttempted;
+  const submitDisabled = Boolean(loading || form.unknownTime);
 
   return (
     <motion.form
@@ -251,7 +254,7 @@ export default function BirthForm({ onSubmit, loading, initialData, onFormSave, 
               required
             >
               <option value="">年份</option>
-              {Array.from({ length: 127 }, (_, i) => 2026 - i).map(yr => (
+              {Array.from({ length: CURRENT_YEAR - MIN_BIRTH_YEAR + 1 }, (_, i) => CURRENT_YEAR - i).map(yr => (
                 <option key={yr} value={String(yr)}>{yr}</option>
               ))}
             </select>
@@ -346,7 +349,7 @@ export default function BirthForm({ onSubmit, loading, initialData, onFormSave, 
       {/* ── 出生时间 ── */}
       <div style={{ marginBottom: '16px' }}>
         <label style={{ display: 'block', fontSize: '11px', color: labelClr, marginBottom: '6px', letterSpacing: '0.05em' }}>出生时间（北京时间）</label>
-        <div style={{ borderRadius: '14px', padding: '12px', background: panelBg, border: `1px solid ${panelBorder}`, opacity: form.unknownTime ? 0.45 : 1, pointerEvents: form.unknownTime ? 'none' : 'auto', transition: 'opacity 0.2s' }}>
+        <div style={{ borderRadius: '14px', padding: '12px', background: panelBg, border: `1px solid ${panelBorder}`, opacity: form.unknownTime ? 0.55 : 1, pointerEvents: form.unknownTime ? 'none' : 'auto', transition: 'opacity 0.2s' }}>
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px', marginBottom: '8px' }}>
             <select
               value={form.clockHour}
@@ -369,9 +372,11 @@ export default function BirthForm({ onSubmit, loading, initialData, onFormSave, 
           </div>
           {/* 真太阳时结果 */}
           <div style={{ textAlign: 'center', padding: '4px 0' }}>
-            <span style={{ fontSize: '10px', color: isDark ? 'rgba(170,195,220,0.75)' : 'rgba(140,100,20,0.5)' }}>真太阳时 → </span>
+            <span style={{ fontSize: '10px', color: isDark ? 'rgba(170,195,220,0.75)' : 'rgba(140,100,20,0.5)' }}>
+              {form.unknownTime ? '排盘状态 → ' : '真太阳时 → '}
+            </span>
             <span style={{ fontSize: '15px', color: goldText, fontWeight: 600, letterSpacing: '0.08em' }}>
-              {SHICHEN_NAMES[branch]}时
+              {form.unknownTime ? '时辰未确定' : `${SHICHEN_NAMES[branch]}时`}
             </span>
             {shichenInfo && (
               <span style={{ fontSize: '10px', color: isDark ? 'rgba(170,195,220,0.75)' : 'rgba(140,100,20,0.5)', marginLeft: '4px' }}>
@@ -388,9 +393,25 @@ export default function BirthForm({ onSubmit, loading, initialData, onFormSave, 
             style={{ width: '14px', height: '14px', borderRadius: '4px', cursor: 'pointer' }}
           />
           <span style={{ fontSize: '10px', color: isDark ? 'rgba(165,185,210,0.7)' : 'rgba(140,100,20,0.45)' }}>
-            不知道出生时间，以子时（23:00–01:00）起盘
+            不知道准确出生时间
           </span>
         </label>
+        <AnimatePresence>
+          {form.unknownTime && (
+            <motion.div
+              initial={{ opacity: 0, y: -4, height: 0, marginTop: 0 }}
+              animate={{ opacity: 1, y: 0, height: 'auto', marginTop: 9 }}
+              exit={{ opacity: 0, y: -4, height: 0, marginTop: 0 }}
+              style={{
+                overflow: 'hidden', padding: '10px 12px', borderRadius: '12px',
+                background: warningBg, border: `1px solid ${warningBorder}`,
+                color: warningText, fontSize: '10px', lineHeight: 1.65,
+              }}
+            >
+              出生时辰决定命宫、身宫及十二宫位置。为避免把未知时辰误当成子时，目前不会生成完整命盘或 AI 合盘；请尽量补充准确时间。
+            </motion.div>
+          )}
+        </AnimatePresence>
       </div>
 
       {/* ── 性别 ── */}
@@ -445,7 +466,7 @@ export default function BirthForm({ onSubmit, loading, initialData, onFormSave, 
               alignItems: 'center',
               gap: '8px',
             }}>
-              <span style={{ fontSize: '12px', color: summaryClr }}>✓</span>
+              <span style={{ fontSize: '12px', color: summaryClr }}>{form.unknownTime ? '!' : '✓'}</span>
               <span style={{ fontSize: '11px', color: summaryClr, letterSpacing: '0.03em', flex: 1 }}>
                 {summaryText}
               </span>
@@ -457,9 +478,9 @@ export default function BirthForm({ onSubmit, loading, initialData, onFormSave, 
       {/* ── 提交按钮 ── */}
       {!hideSubmit && <motion.button
         type="submit"
-        disabled={loading}
-        whileHover={loading ? {} : { scale: 1.01 }}
-        whileTap={loading ? {} : { scale: 0.98 }}
+        disabled={submitDisabled}
+        whileHover={submitDisabled ? {} : { scale: 1.01 }}
+        whileTap={submitDisabled ? {} : { scale: 0.98 }}
         style={{
           width: '100%',
           padding: '14px',
@@ -468,14 +489,14 @@ export default function BirthForm({ onSubmit, loading, initialData, onFormSave, 
           fontWeight: 600,
           letterSpacing: '0.15em',
           border: 'none',
-          cursor: loading ? 'not-allowed' : 'pointer',
-          background: loading
+          cursor: submitDisabled ? 'not-allowed' : 'pointer',
+          background: submitDisabled
             ? (isDark ? 'rgba(212,168,67,0.15)' : 'rgba(180,120,20,0.15)')
             : (isDark
               ? 'linear-gradient(135deg, rgba(180,130,40,0.9), rgba(240,200,80,0.9))'
               : 'linear-gradient(135deg, #9a6210, #c88020)'),
-          color: loading ? (isDark ? 'rgba(212,168,67,0.4)' : 'rgba(120,80,10,0.4)') : (isDark ? '#08080a' : '#fff8e8'),
-          boxShadow: loading ? 'none' : (isDark ? '0 4px 20px rgba(212,168,67,0.2)' : '0 4px 16px rgba(140,100,20,0.25)'),
+          color: submitDisabled ? (isDark ? 'rgba(212,168,67,0.4)' : 'rgba(120,80,10,0.4)') : (isDark ? '#08080a' : '#fff8e8'),
+          boxShadow: submitDisabled ? 'none' : (isDark ? '0 4px 20px rgba(212,168,67,0.2)' : '0 4px 16px rgba(140,100,20,0.25)'),
           transition: 'all 0.2s',
         }}
       >
@@ -488,7 +509,7 @@ export default function BirthForm({ onSubmit, loading, initialData, onFormSave, 
             />
             紫微起盘中…
           </span>
-        ) : '立即起盘 · 解命运密码'}
+        ) : form.unknownTime ? '请先补充出生时间' : '立即起盘 · 解命运密码'}
       </motion.button>}
     </motion.form>
   );
