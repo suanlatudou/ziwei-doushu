@@ -1,55 +1,16 @@
 import type { BirthFormState } from '@/components/BirthForm';
+import { calcTrueSolarBranch, normalizeBirthForm } from './birth-normalize';
 import type { BirthInfo } from './types';
 
-/** 根据北京时间 + 经度计算真太阳时时辰支 (0-11) */
-export function calcTrueSolarBranch(clockHour: number, clockMinute: number, longitude: number): number {
-  const clockMins = clockHour * 60 + clockMinute;
-  const offset = (longitude - 120) * 4;
-  const solar = ((clockMins + offset) % 1440 + 1440) % 1440;
-  if (solar >= 1380 || solar < 60) return 0;
-  return Math.floor((solar - 60) / 120) + 1;
-}
+export { calcTrueSolarBranch };
 
-/** BirthFormState → BirthInfo
+/**
+ * BirthFormState → BirthInfo。
  *
- * 子时规则（倪海厦体系/三合派标准）：
- * · 23:00-23:59 = 晚子时，**按次日**排盘（日期 +1）
- * · 00:00-00:59 = 早子时，按本日排盘
- * 这与「时辰支同为子(0)」并不冲突——子时分早晚两段，需要在日期上区分。
+ * 所有单盘、合盘与分享恢复入口统一使用 normalizeBirthForm，避免真太阳时和晚子时规则分叉。
  */
 export function formToBirthInfo(form: BirthFormState): BirthInfo {
-  if (form.unknownTime) {
-    throw new Error('出生时辰未知，无法可靠定位命宫、身宫和十二宫。请补充出生时间后再排盘或合盘。');
-  }
-
-  let y = parseInt(form.year) || 0;
-  let m = parseInt(form.month) || 0;
-  let d = parseInt(form.day) || 0;
-
-  // 晚子时（23:00-23:59）按次日处理：用 Date 对象自动处理月末/年末进位
-  const clockHour = parseInt(form.clockHour) || 0;
-  if (clockHour === 23 && y > 0 && m > 0 && d > 0) {
-    const next = new Date(y, m - 1, d + 1);
-    y = next.getFullYear();
-    m = next.getMonth() + 1;
-    d = next.getDate();
-  }
-
-  const hour = calcTrueSolarBranch(
-    clockHour,
-    parseInt(form.clockMinute) || 0,
-    form.longitude,
-  );
-
-  return {
-    year: y, month: m, day: d,
-    hour,
-    gender: form.gender,
-    name: form.name || undefined,
-    province: form.province || undefined,
-    city: form.city || undefined,
-    longitude: form.province ? form.longitude : undefined,
-  };
+  return normalizeBirthForm(form);
 }
 
 /**
