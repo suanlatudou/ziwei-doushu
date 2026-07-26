@@ -1,4 +1,4 @@
-const FALLBACK_SITE_URL = 'https://ziwei-doushu-5xd.pages.dev';
+const FALLBACK_SITE_URL = 'https://metisziwei.com';
 
 function normalizePublicUrl(value: string | undefined): string {
   const candidate = value?.trim() || FALLBACK_SITE_URL;
@@ -16,6 +16,6 @@ function normalizePublicUrl(value: string | undefined): string {
 
 /**
  * 站点唯一公开地址。
- * Cloudflare Pages 生产环境通过 NEXT_PUBLIC_SITE_URL 覆盖；未配置时回退到 pages.dev。
+ * Cloudflare Pages 可通过 NEXT_PUBLIC_SITE_URL 覆盖；未配置时使用正式域名。
  */
 export const SITE_URL = normalizePublicUrl(process.env.NEXT_PUBLIC_SITE_URL);
