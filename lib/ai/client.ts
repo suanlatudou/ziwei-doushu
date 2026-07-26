@@ -23,12 +23,12 @@ export interface AiResponseMeta {
   remainingCredits?: number;
 }
 
-const LEGACY_AI_API_URL = 'https://ziwei-ai-api.730333227.workers.dev/api/interpret';
+const SAME_ORIGIN_AI_API_URL = '/api/interpret';
 const CLIENT_ID_KEY = 'ziwei-ai-client-id';
 
 function normalizeAiApiUrl(rawValue: string | undefined): string {
   const value = rawValue?.trim();
-  if (!value) return LEGACY_AI_API_URL;
+  if (!value) return SAME_ORIGIN_AI_API_URL;
 
   try {
     const url = new URL(value);
@@ -41,8 +41,12 @@ function normalizeAiApiUrl(rawValue: string | undefined): string {
   }
 }
 
+/**
+ * 默认请求当前站点的 Cloudflare Pages Function。
+ * 仅在显式配置 NEXT_PUBLIC_AI_API_URL 时优先使用外部接口，并保留同域接口作为网络故障兜底。
+ */
 export const AI_API_URL = normalizeAiApiUrl(process.env.NEXT_PUBLIC_AI_API_URL);
-const AI_API_CANDIDATES = [...new Set([AI_API_URL, LEGACY_AI_API_URL])];
+const AI_API_CANDIDATES = [...new Set([AI_API_URL, SAME_ORIGIN_AI_API_URL])];
 
 export class AiApiError extends Error {
   status?: number;
@@ -84,15 +88,17 @@ async function readErrorDetails(response: Response): Promise<{
   remainingFree?: number;
   remainingCredits?: number;
 }> {
-  const fallback = response.status === 402
-    ? '今日免费次数和付费次数均已用完，请充值次数或开通 VIP。'
-    : response.status === 429
-      ? '请求过于频繁，请稍后再试。'
-      : response.status === 401
-        ? '人机验证失败，请刷新后重试。'
-        : response.status >= 500
-          ? 'AI 服务暂时不可用，请稍后重试。'
-          : '请求失败，请检查信息后重试。';
+  const fallback = response.status === 404
+    ? '当前站点的 AI 接口尚未部署，请检查 Cloudflare Pages Functions 构建结果。'
+    : response.status === 402
+      ? '今日免费次数和付费次数均已用完，请充值次数或开通 VIP。'
+      : response.status === 429
+        ? '请求过于频繁，请稍后再试。'
+        : response.status === 401
+          ? '人机验证失败，请刷新后重试。'
+          : response.status >= 500
+            ? 'AI 服务暂时不可用，请稍后重试。'
+            : '请求失败，请检查信息后重试。';
 
   try {
     const text = await response.text();
@@ -169,7 +175,6 @@ export async function streamAiInterpret({
   };
 
   let response: Response | null = null;
-  let lastNetworkError: unknown;
 
   for (const endpoint of AI_API_CANDIDATES) {
     try {
@@ -177,14 +182,13 @@ export async function streamAiInterpret({
       break;
     } catch (error) {
       if (signal?.aborted) throw error;
-      lastNetworkError = error;
       console.error('AI endpoint network request failed', endpoint, error);
     }
   }
 
   if (!response) {
     throw new AiApiError(
-      '无法连接 AI 服务。请检查 Worker 是否已部署、地址是否正确，以及当前域名是否已加入 CORS 白名单。',
+      '无法连接本站 AI 接口，请检查 Cloudflare Pages 是否已完成最新部署。',
       undefined,
       { code: 'AI_NETWORK_UNREACHABLE' },
     );
