@@ -7,8 +7,7 @@ import { generateChart } from '@/lib/ziwei/algorithm';
 import { formToBirthInfo } from '@/lib/ziwei/share';
 import type { ZiweiChart } from '@/lib/ziwei/types';
 import { useTheme } from '@/components/ThemeProvider';
-
-const AI_WORKER_URL = 'https://ziwei-ai-api.730333227.workers.dev/api/interpret';
+import { streamAiInterpret } from '@/lib/ai/client';
 
 type CompatibilityType = 'love' | 'business' | 'parentChild' | 'friend';
 
@@ -330,7 +329,8 @@ function AiContent({ text, streaming }: { text: string; streaming?: boolean }) {
 
 function isFormReady(form: BirthFormState | null): form is BirthFormState {
   if (!form || !form.year || !form.month || !form.day) return false;
-  if (!form.unknownTime && (form.clockHour === '' || form.clockMinute === '')) return false;
+  if (form.unknownTime) return false;
+  if (form.clockHour === '' || form.clockMinute === '') return false;
 
   const year = Number(form.year);
   const month = Number(form.month);
@@ -338,22 +338,17 @@ function isFormReady(form: BirthFormState | null): form is BirthFormState {
   const date = new Date(year, month - 1, day);
 
   return year >= 1900
-    && year <= 2026
+    && year <= new Date().getFullYear()
     && date.getFullYear() === year
     && date.getMonth() === month - 1
     && date.getDate() === day;
 }
 
 function buildCompatibilityPrompt(
-  chartB: ZiweiChart,
-  formA: BirthFormState,
-  formB: BirthFormState,
   compatibilityType: CompatibilityType,
   question?: string,
 ): string {
   const config = COMPATIBILITY_TYPES[compatibilityType];
-  const nameA = formA.name.trim() || config.partyALabel;
-  const nameB = formB.name.trim() || config.partyBLabel;
   const followUp = question?.trim();
   const dimensionsJson = config.scoreDimensions.map(label => `{"label":"${label}","score":整数}`).join(',');
 
@@ -363,9 +358,7 @@ function buildCompatibilityPrompt(
 
   return `你现在进行的是紫微斗数双人${config.label}合盘，而不是单人命盘解读。
 请严格基于两份紫微斗数命盘中的星曜、宫位互动关系进行分析，不要脱离盘面空谈，也不要套用泛泛的人际关系鸡汤。
-系统附带的命盘数据是${config.partyALabel}【${nameA}】的命盘；下面 JSON 是${config.partyBLabel}【${nameB}】的完整命盘数据：
-
-${JSON.stringify(chartB)}
+系统已分别附带${config.partyALabel}与${config.partyBLabel}的结构化命盘数据，请明确区分双方。
 
 本次合盘类型：${config.label}。
 重点对照宫位：${config.focusPalaces}。
@@ -434,6 +427,11 @@ export default function HemingPage() {
     setFormError(null);
     setAnalysisError(null);
 
+    if (formA?.unknownTime || formB?.unknownTime) {
+      setFormError('合盘需要双方准确出生时辰，请补充出生时间后再分析');
+      return;
+    }
+
     if (!isFormReady(formA) || !isFormReady(formB)) {
       setFormError('请先填写双方完整、有效的出生信息');
       return;
@@ -456,73 +454,18 @@ export default function HemingPage() {
       if (!chartA) setChartA(currentChartA);
       if (!chartB) setChartB(currentChartB);
 
-      const prompt = buildCompatibilityPrompt(currentChartB, formA, formB, compatibilityType, requestedQuestion);
-      const res = await fetch(AI_WORKER_URL, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          chart: currentChartA,
-          messages: [{ role: 'user', content: prompt }],
-        }),
+      const prompt = buildCompatibilityPrompt(compatibilityType, requestedQuestion);
+      const text = await streamAiInterpret({
+        mode: 'compatibility',
+        chart: currentChartA,
+        secondaryChart: currentChartB,
+        messages: [{ role: 'user', content: prompt }],
+        onDelta: (_delta, fullText) => {
+          setAnalysis(fullText);
+          const parsedScore = parseScoreMarker(fullText);
+          if (parsedScore) setScore(parsedScore);
+        },
       });
-
-      if (!res.ok) {
-        const detail = await res.text().catch(() => '');
-        console.error('合盘 Worker 请求失败', res.status, detail);
-        throw new Error(`AI 服务返回 ${res.status}`);
-      }
-      if (!res.body) throw new Error('AI 服务没有返回内容');
-
-      const reader = res.body.getReader();
-      const decoder = new TextDecoder();
-      let text = '';
-      let buffer = '';
-      let serverDone = false;
-
-      const applyText = (nextText: string) => {
-        setAnalysis(nextText);
-        const parsedScore = parseScoreMarker(nextText);
-        if (parsedScore) setScore(parsedScore);
-      };
-
-      const consumeLine = (rawLine: string) => {
-        const line = rawLine.trimEnd();
-        if (!line.startsWith('data:')) return;
-
-        const data = line.slice(5).trimStart();
-        if (!data) return;
-        if (data === '[DONE]') {
-          serverDone = true;
-          return;
-        }
-
-        try {
-          const parsed = JSON.parse(data);
-          const delta = parsed.delta?.text
-            ?? parsed.choices?.[0]?.delta?.content
-            ?? parsed.content
-            ?? '';
-          if (delta) {
-            text += delta;
-            applyText(text);
-          }
-        } catch {
-          // 忽略非 JSON 的 SSE 行。
-        }
-      };
-
-      while (!serverDone) {
-        const { done, value } = await reader.read();
-        if (done) break;
-
-        buffer += decoder.decode(value, { stream: true });
-        const lines = buffer.split('\n');
-        buffer = lines.pop() ?? '';
-        lines.forEach(consumeLine);
-      }
-
-      buffer += decoder.decode();
-      if (buffer.trim()) consumeLine(buffer);
       if (!removeScoreMarker(text).trim()) throw new Error('AI 服务未返回有效合盘内容');
 
       setQuestion('');
@@ -622,7 +565,7 @@ export default function HemingPage() {
         }}>
           <div style={{ fontSize: '12px', fontWeight: 600, color: 'var(--ac)', marginBottom: '6px' }}>合盘使用提示</div>
           <p style={{ fontSize: '12px', lineHeight: 1.75, color: 'var(--tx-2)', marginBottom: '10px' }}>
-            合盘属于双人专项 AI 解读，后续将单独计费；当前内测期间暂不扣费。结果与评分均仅供传统文化学习、关系沟通与个人思考参考，不代表关系的确定结论，也不应作为婚姻、教育、合作或其他重大决定的唯一依据。
+            合盘属于双人专项 AI 解读，每次消耗 2 次额度；VIP 与缓存命中不扣次数。结果与评分均仅供传统文化学习、关系沟通与个人思考参考，不代表关系的确定结论，也不应作为婚姻、教育、合作或其他重大决定的唯一依据。
           </p>
           <label style={{ display: 'flex', alignItems: 'flex-start', gap: '9px', cursor: 'pointer', fontSize: '12px', color: 'var(--tx-1)' }}>
             <input

@@ -7,10 +7,20 @@ export interface AiMessage {
 
 export interface StreamAiOptions {
   chart: unknown;
+  secondaryChart?: unknown;
+  mode?: 'chart' | 'compatibility';
   messages: AiMessage[];
   onDelta: (delta: string, fullText: string) => void;
+  onMeta?: (meta: AiResponseMeta) => void;
   signal?: AbortSignal;
   turnstileToken?: string;
+  cache?: boolean;
+}
+
+export interface AiResponseMeta {
+  cacheHit: boolean;
+  remainingFree?: number;
+  remainingCredits?: number;
 }
 
 const LEGACY_AI_API_URL = 'https://ziwei-ai-api.730333227.workers.dev/api/interpret';
@@ -22,11 +32,21 @@ export const AI_API_URL = (
 
 export class AiApiError extends Error {
   status?: number;
+  code?: string;
+  remainingFree?: number;
+  remainingCredits?: number;
 
-  constructor(message: string, status?: number) {
+  constructor(
+    message: string,
+    status?: number,
+    details?: { code?: string; remainingFree?: number; remainingCredits?: number },
+  ) {
     super(message);
     this.name = 'AiApiError';
     this.status = status;
+    this.code = details?.code;
+    this.remainingFree = details?.remainingFree;
+    this.remainingCredits = details?.remainingCredits;
   }
 }
 
@@ -44,8 +64,15 @@ export function getOrCreateAiClientId(): string {
   return generated;
 }
 
-async function readErrorMessage(response: Response): Promise<string> {
-  const fallback = response.status === 429
+async function readErrorDetails(response: Response): Promise<{
+  message: string;
+  code?: string;
+  remainingFree?: number;
+  remainingCredits?: number;
+}> {
+  const fallback = response.status === 402
+    ? '今日免费次数和付费次数均已用完，请充值次数或开通 VIP。'
+    : response.status === 429
     ? '请求过于频繁，请稍后再试。'
     : response.status === 401
       ? '人机验证失败，请刷新后重试。'
@@ -55,17 +82,28 @@ async function readErrorMessage(response: Response): Promise<string> {
 
   try {
     const text = await response.text();
-    if (!text) return fallback;
+    if (!text) return { message: fallback };
 
     try {
-      const parsed = JSON.parse(text) as { error?: unknown; message?: unknown };
+      const parsed = JSON.parse(text) as {
+        error?: unknown;
+        message?: unknown;
+        code?: unknown;
+        remainingFree?: unknown;
+        remainingCredits?: unknown;
+      };
       const message = parsed.error ?? parsed.message;
-      return typeof message === 'string' && message.trim() ? message : fallback;
+      return {
+        message: typeof message === 'string' && message.trim() ? message : fallback,
+        code: typeof parsed.code === 'string' ? parsed.code : undefined,
+        remainingFree: typeof parsed.remainingFree === 'number' ? parsed.remainingFree : undefined,
+        remainingCredits: typeof parsed.remainingCredits === 'number' ? parsed.remainingCredits : undefined,
+      };
     } catch {
-      return text.length <= 160 ? text : fallback;
+      return { message: text.length <= 160 ? text : fallback };
     }
   } catch {
-    return fallback;
+    return { message: fallback };
   }
 }
 
@@ -88,32 +126,52 @@ function extractDelta(data: string): string {
 
 export async function streamAiInterpret({
   chart,
+  secondaryChart,
+  mode = 'chart',
   messages,
   onDelta,
+  onMeta,
   signal,
   turnstileToken,
+  cache = true,
 }: StreamAiOptions): Promise<string> {
+  const clientId = getOrCreateAiClientId();
   const response = await fetch(AI_API_URL, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
-      'X-Ziwei-Client': getOrCreateAiClientId(),
+      'X-Ziwei-Client': clientId,
     },
     signal,
     body: JSON.stringify({
       chart,
+      secondaryChart,
+      mode,
       messages,
       turnstileToken,
-      clientId: getOrCreateAiClientId(),
+      clientId,
+      cache,
     }),
   });
 
   if (!response.ok) {
-    throw new AiApiError(await readErrorMessage(response), response.status);
+    const details = await readErrorDetails(response);
+    throw new AiApiError(details.message, response.status, details);
   }
   if (!response.body) {
     throw new AiApiError('AI 服务没有返回内容。', response.status);
   }
+
+  const parseOptionalNumber = (value: string | null): number | undefined => {
+    if (value === null || value === '') return undefined;
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : undefined;
+  };
+  onMeta?.({
+    cacheHit: response.headers.get('X-AI-Cache') === 'HIT',
+    remainingFree: parseOptionalNumber(response.headers.get('X-AI-Remaining-Free')),
+    remainingCredits: parseOptionalNumber(response.headers.get('X-AI-Remaining-Credits')),
+  });
 
   const reader = response.body.getReader();
   const decoder = new TextDecoder();

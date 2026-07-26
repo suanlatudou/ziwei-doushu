@@ -8,6 +8,7 @@ import {
 import type { Palace, ZiweiChart } from '../../lib/ziwei/types';
 
 export type AiMode = 'chart' | 'compatibility';
+export const KNOWLEDGE_VERSION = 'v1';
 
 const PALACE_KEYWORDS: Array<[string[], string[]]> = [
   [['感情', '婚姻', '恋爱', '夫妻'], ['夫妻宫', '福德宫', '命宫', '迁移宫']],

@@ -1,5 +1,25 @@
+import {
+  buildKnowledgeContext,
+  KNOWLEDGE_VERSION,
+  type AiMode,
+} from './knowledge';
+import {
+  getCachedResponse,
+  purgeExpiredCache,
+  chargeQuota,
+  recordUsage,
+  refundQuota,
+  saveCachedResponse,
+  type ChargeResult,
+  type D1Database,
+} from './storage';
+
 interface RateLimitBinding {
   limit(options: { key: string }): Promise<{ success: boolean }>;
+}
+
+interface ExecutionContextLike {
+  waitUntil(promise: Promise<unknown>): void;
 }
 
 export interface Env {
@@ -7,10 +27,14 @@ export interface Env {
   DEEPSEEK_MODEL?: string;
   ALLOWED_ORIGINS?: string;
   TURNSTILE_SECRET?: string;
+  FREE_DAILY_LIMIT?: string;
+  COMPATIBILITY_CREDIT_COST?: string;
+  AI_CACHE_TTL_SECONDS?: string;
   RATE_LIMITER?: RateLimitBinding;
+  DB?: D1Database;
 }
 
-type ChatRole = 'user' | 'assistant';
+type ChatRole = 'system' | 'user' | 'assistant';
 
 interface ChatMessage {
   role: ChatRole;
@@ -19,9 +43,12 @@ interface ChatMessage {
 
 interface InterpretRequest {
   chart?: unknown;
+  secondaryChart?: unknown;
+  mode?: AiMode;
   messages?: ChatMessage[];
   turnstileToken?: string;
   clientId?: string;
+  cache?: boolean;
 }
 
 const DEFAULT_ALLOWED_ORIGINS = [
@@ -29,12 +56,27 @@ const DEFAULT_ALLOWED_ORIGINS = [
   'https://wdyziweidoushu666.com',
 ];
 const MAX_BODY_BYTES = 200_000;
-const MAX_CHART_CHARS = 140_000;
+const MAX_CHART_CHARS = 160_000;
 const MAX_MESSAGES = 12;
 const MAX_MESSAGE_CHARS = 8_000;
+const DEFAULT_FREE_DAILY_LIMIT = 3;
+const DEFAULT_COMPATIBILITY_COST = 2;
+const DEFAULT_CACHE_TTL_SECONDS = 604_800;
+const MAX_CACHE_TTL_SECONDS = 2_592_000;
 
 function jsonResponse(data: unknown, status: number, headers: HeadersInit): Response {
   return Response.json(data, { status, headers });
+}
+
+function parsePositiveInteger(
+  value: string | undefined,
+  fallback: number,
+  maximum: number,
+): number {
+  const parsed = Number.parseInt(value ?? '', 10);
+  return Number.isInteger(parsed) && parsed > 0
+    ? Math.min(parsed, maximum)
+    : fallback;
 }
 
 function parseAllowedOrigins(env: Env): Set<string> {
@@ -49,6 +91,7 @@ function corsHeaders(origin: string | null, allowedOrigins: Set<string>): Record
   const headers: Record<string, string> = {
     'Access-Control-Allow-Headers': 'content-type, x-ziwei-client',
     'Access-Control-Allow-Methods': 'POST, OPTIONS',
+    'Access-Control-Expose-Headers': 'x-ai-cache, x-ai-remaining-free, x-ai-remaining-credits',
     'Access-Control-Max-Age': '86400',
     Vary: 'Origin',
   };
@@ -75,14 +118,24 @@ function normalizeRequest(value: unknown): InterpretRequest | null {
   const messages = Array.isArray(raw.messages)
     ? raw.messages.filter(isValidMessage).slice(-MAX_MESSAGES)
     : [];
+  const mode: AiMode = raw.mode === 'compatibility' ? 'compatibility' : 'chart';
 
-  if (messages.length === 0 || raw.chart === undefined) return null;
+  if (
+    messages.length === 0
+    || raw.chart === undefined
+    || (mode === 'compatibility' && raw.secondaryChart === undefined)
+  ) {
+    return null;
+  }
 
   return {
     chart: raw.chart,
+    secondaryChart: raw.secondaryChart,
+    mode,
     messages,
     turnstileToken: typeof raw.turnstileToken === 'string' ? raw.turnstileToken : undefined,
     clientId: typeof raw.clientId === 'string' ? raw.clientId.slice(0, 128) : undefined,
+    cache: raw.cache !== false,
   };
 }
 
@@ -100,34 +153,133 @@ async function verifyTurnstile(token: string | undefined, ip: string, secret: st
   });
   if (!response.ok) return false;
 
-  const result = await response.json<{ success?: boolean }>();
+  const result = await response.json() as { success?: boolean };
   return result.success === true;
 }
 
-async function makeRateLimitKey(request: Request, body: InterpretRequest): Promise<string> {
+async function sha256Hex(value: string): Promise<string> {
+  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(value));
+  return Array.from(
+    new Uint8Array(digest),
+    byte => byte.toString(16).padStart(2, '0'),
+  ).join('');
+}
+
+async function resolveClientId(request: Request, body: InterpretRequest): Promise<string> {
   const explicitClient = request.headers.get('X-Ziwei-Client') || body.clientId;
   if (explicitClient && /^[a-zA-Z0-9._:-]{8,128}$/.test(explicitClient)) {
-    return `client:${explicitClient}`;
+    return explicitClient;
   }
 
   const ip = request.headers.get('CF-Connecting-IP') || 'unknown';
   const userAgent = request.headers.get('User-Agent') || 'unknown';
-  const bytes = new TextEncoder().encode(`${ip}|${userAgent}`);
-  const digest = await crypto.subtle.digest('SHA-256', bytes);
-  const hash = Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, '0')).join('');
-  return `guest:${hash}`;
+  return `guest:${await sha256Hex(`${ip}|${userAgent}`)}`;
 }
 
-function buildSystemMessage(chart: unknown): ChatMessage {
-  const chartJson = JSON.stringify(chart);
+function stripChartIdentity(value: unknown): unknown {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return value;
+  const chart = value as Record<string, unknown>;
+  const birthInfo = chart.birthInfo;
+  if (!birthInfo || typeof birthInfo !== 'object' || Array.isArray(birthInfo)) {
+    return chart;
+  }
+
+  const {
+    name: _name,
+    province: _province,
+    city: _city,
+    longitude: _longitude,
+    ...anonymousBirthInfo
+  } = birthInfo as Record<string, unknown>;
+
+  return {
+    ...chart,
+    birthInfo: anonymousBirthInfo,
+  };
+}
+
+function stableJson(value: unknown): string {
+  const normalize = (item: unknown): unknown => {
+    if (Array.isArray(item)) return item.map(normalize);
+    if (item && typeof item === 'object') {
+      return Object.fromEntries(
+        Object.entries(item as Record<string, unknown>)
+          .filter(([, entry]) => entry !== undefined)
+          .sort(([left], [right]) => left.localeCompare(right))
+          .map(([key, entry]) => [key, normalize(entry)]),
+      );
+    }
+    return item;
+  };
+
+  return JSON.stringify(normalize(value));
+}
+
+async function makeCacheKey(
+  body: InterpretRequest,
+  question: string,
+  model: string,
+): Promise<string> {
+  return sha256Hex(stableJson({
+    version: KNOWLEDGE_VERSION,
+    mode: body.mode,
+    chart: stripChartIdentity(body.chart),
+    secondaryChart: body.mode === 'compatibility'
+      ? stripChartIdentity(body.secondaryChart)
+      : undefined,
+    question,
+    model,
+  }));
+}
+
+function buildSystemMessage(
+  body: InterpretRequest,
+  knowledgeContext: string,
+): ChatMessage {
+  const chartData = body.mode === 'compatibility'
+    ? {
+        partyA: stripChartIdentity(body.chart),
+        partyB: stripChartIdentity(body.secondaryChart),
+      }
+    : stripChartIdentity(body.chart);
+  const chartJson = JSON.stringify(chartData);
   if (!chartJson || chartJson.length > MAX_CHART_CHARS) {
     throw new Error('CHART_TOO_LARGE');
   }
 
+  const modeInstruction = body.mode === 'compatibility'
+    ? '这是双人合盘。必须同时分析甲方和乙方，并明确指出依据来自哪一方的宫位、星曜或四化。'
+    : '这是单人命盘解读。';
+
   return {
-    role: 'user',
-    content: `以下是系统生成的紫微斗数命盘 JSON。你必须以盘面中的宫位、星曜、四化和大限数据为依据回答，不得虚构盘中不存在的信息。内容仅供传统文化学习和个人思考，不得替代医疗、法律、投资、婚姻或其他重大决策。\n\n【命盘数据】\n${chartJson}`,
+    role: 'system',
+    content: `你是严谨的紫微斗数传统文化解读助手。${modeInstruction}
+必须以系统提供的结构化盘面和知识检索结果为依据，不得虚构盘中不存在的信息；如果证据不足，应明确说明。避免宿命化和绝对化措辞。
+内容仅供传统文化学习和个人思考，不得替代医疗、法律、投资、婚姻、教育或其他重大决策。
+
+【结构化命盘数据】
+${chartJson}
+
+【知识检索结果】
+${knowledgeContext || '本次未命中额外知识条目，请仅依据结构化命盘作答。'}`,
   };
+}
+
+function parseDeepSeekData(data: string): { done: boolean; content: string } {
+  if (!data) return { done: false, content: '' };
+  if (data === '[DONE]') return { done: true, content: '' };
+
+  try {
+    const parsed = JSON.parse(data) as {
+      choices?: Array<{ delta?: { content?: string | null } }>;
+    };
+    return {
+      done: false,
+      content: parsed.choices?.[0]?.delta?.content ?? '',
+    };
+  } catch {
+    return { done: false, content: '' };
+  }
 }
 
 function transformDeepSeekStream(stream: ReadableStream<Uint8Array>): ReadableStream<Uint8Array> {
@@ -140,26 +292,18 @@ function transformDeepSeekStream(stream: ReadableStream<Uint8Array>): ReadableSt
     const line = rawLine.trimEnd();
     if (!line.startsWith('data:')) return;
 
-    const data = line.slice(5).trimStart();
-    if (!data) return;
-    if (data === '[DONE]') {
+    const parsed = parseDeepSeekData(line.slice(5).trimStart());
+    if (parsed.done) {
       if (!doneSent) {
         controller.enqueue(encoder.encode('data: [DONE]\n\n'));
         doneSent = true;
       }
       return;
     }
-
-    try {
-      const parsed = JSON.parse(data) as {
-        choices?: Array<{ delta?: { content?: string | null } }>;
-      };
-      const content = parsed.choices?.[0]?.delta?.content;
-      if (content) {
-        controller.enqueue(encoder.encode(`data: ${JSON.stringify({ delta: { text: content } })}\n\n`));
-      }
-    } catch {
-      // DeepSeek may send keep-alive comments or a line split between chunks.
+    if (parsed.content) {
+      controller.enqueue(encoder.encode(
+        `data: ${JSON.stringify({ delta: { text: parsed.content } })}\n\n`,
+      ));
     }
   };
 
@@ -180,8 +324,126 @@ function transformDeepSeekStream(stream: ReadableStream<Uint8Array>): ReadableSt
   return stream.pipeThrough(transformer);
 }
 
+async function collectDeepSeekStream(stream: ReadableStream<Uint8Array>): Promise<string> {
+  const reader = stream.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+  let fullText = '';
+  let serverDone = false;
+
+  const consumeLine = (rawLine: string) => {
+    const line = rawLine.trimEnd();
+    if (!line.startsWith('data:')) return;
+    const parsed = parseDeepSeekData(line.slice(5).trimStart());
+    serverDone ||= parsed.done;
+    fullText += parsed.content;
+  };
+
+  while (!serverDone) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    const lines = buffer.split('\n');
+    buffer = lines.pop() ?? '';
+    lines.forEach(consumeLine);
+  }
+
+  buffer += decoder.decode();
+  if (buffer.trim()) consumeLine(buffer);
+  return fullText;
+}
+
+function sseHeaders(
+  baseHeaders: Record<string, string>,
+  cacheStatus: 'HIT' | 'MISS',
+  charge?: ChargeResult,
+): Record<string, string> {
+  const headers: Record<string, string> = {
+    ...baseHeaders,
+    'Content-Type': 'text/event-stream; charset=utf-8',
+    'Cache-Control': 'no-cache, no-transform',
+    Connection: 'keep-alive',
+    'X-Content-Type-Options': 'nosniff',
+    'X-AI-Cache': cacheStatus,
+  };
+
+  if (charge?.remainingFree !== undefined) {
+    headers['X-AI-Remaining-Free'] = String(charge.remainingFree);
+  }
+  if (charge?.remainingCredits !== undefined) {
+    headers['X-AI-Remaining-Credits'] = String(charge.remainingCredits);
+  }
+  return headers;
+}
+
+function cachedSseResponse(text: string, headers: Record<string, string>): Response {
+  const encoder = new TextEncoder();
+  return new Response(encoder.encode(
+    `data: ${JSON.stringify({ delta: { text } })}\n\ndata: [DONE]\n\n`,
+  ), {
+    status: 200,
+    headers,
+  });
+}
+
+async function finalizeCompletion(options: {
+  db: D1Database;
+  stream: ReadableStream<Uint8Array>;
+  clientId: string;
+  mode: AiMode;
+  cacheKey: string;
+  cacheEnabled: boolean;
+  cacheTtlSeconds: number;
+  charge: ChargeResult;
+}): Promise<void> {
+  const {
+    db,
+    stream,
+    clientId,
+    mode,
+    cacheKey,
+    cacheEnabled,
+    cacheTtlSeconds,
+    charge,
+  } = options;
+
+  let fullText: string;
+  try {
+    fullText = await collectDeepSeekStream(stream);
+  } catch (error) {
+    console.error('DeepSeek stream collection failed', error);
+    await refundQuota(db, clientId, charge).catch(refundError => {
+      console.error('Quota refund failed', refundError);
+    });
+    return;
+  }
+
+  if (!fullText.trim()) {
+    console.error('DeepSeek stream completed without content');
+    await refundQuota(db, clientId, charge).catch(refundError => {
+      console.error('Quota refund failed', refundError);
+    });
+    return;
+  }
+
+  if (cacheEnabled) {
+    const expiresAt = Math.floor(Date.now() / 1000) + cacheTtlSeconds;
+    await saveCachedResponse(db, cacheKey, mode, fullText, expiresAt).catch(error => {
+      console.error('AI cache save failed', error);
+    });
+  }
+
+  await recordUsage(db, clientId, mode, false, charge).catch(error => {
+    console.error('AI usage recording failed', error);
+  });
+}
+
 export default {
-  async fetch(request: Request, env: Env): Promise<Response> {
+  async fetch(
+    request: Request,
+    env: Env,
+    context: ExecutionContextLike,
+  ): Promise<Response> {
     const url = new URL(request.url);
     const origin = request.headers.get('Origin');
     const allowedOrigins = parseAllowedOrigins(env);
@@ -195,25 +457,22 @@ export default {
     }
 
     if (url.pathname === '/health' && request.method === 'GET') {
-      return jsonResponse({ ok: true, service: 'ziwei-ai-api' }, 200, headers);
+      return jsonResponse({
+        ok: true,
+        service: 'ziwei-ai-api',
+        database: Boolean(env.DB),
+        knowledgeVersion: KNOWLEDGE_VERSION,
+      }, 200, headers);
     }
 
     if (url.pathname !== '/api/interpret') {
       return jsonResponse({ error: '接口不存在' }, 404, headers);
     }
-
     if (request.method !== 'POST') {
       return jsonResponse({ error: '仅支持 POST 请求' }, 405, headers);
     }
-
-    // Browser requests must come from an explicitly allowed site. Requests without Origin
-    // remain available for health checks and controlled server-to-server testing.
     if (origin && !allowedOrigins.has(origin)) {
       return jsonResponse({ error: '当前来源未获授权' }, 403, headers);
-    }
-
-    if (!env.DEEPSEEK_API_KEY) {
-      return jsonResponse({ error: 'AI 服务尚未配置' }, 503, headers);
     }
 
     const declaredLength = Number(request.headers.get('content-length') || 0);
@@ -234,7 +493,7 @@ export default {
 
     const body = normalizeRequest(rawBody);
     if (!body) {
-      return jsonResponse({ error: '命盘或对话内容不完整' }, 400, headers);
+      return jsonResponse({ error: '命盘、合盘对象或对话内容不完整' }, 400, headers);
     }
 
     const ip = request.headers.get('CF-Connecting-IP') || 'unknown';
@@ -245,51 +504,158 @@ export default {
       }
     }
 
+    const clientId = await resolveClientId(request, body);
     if (env.RATE_LIMITER) {
-      const rateKey = await makeRateLimitKey(request, body);
-      const { success } = await env.RATE_LIMITER.limit({ key: rateKey });
+      const { success } = await env.RATE_LIMITER.limit({ key: `client:${clientId}` });
       if (!success) {
         return jsonResponse({ error: '请求过于频繁，请稍后再试' }, 429, headers);
       }
     }
 
+    if (!env.DB) {
+      return jsonResponse({
+        error: '次数服务尚未配置，请先绑定 D1 数据库',
+        code: 'DATABASE_NOT_CONFIGURED',
+      }, 503, headers);
+    }
+
+    const db = env.DB;
+    const mode = body.mode ?? 'chart';
+    const model = env.DEEPSEEK_MODEL || 'deepseek-v4-flash';
+    const question = [...(body.messages ?? [])]
+      .reverse()
+      .find(message => message.role === 'user')
+      ?.content.trim() ?? '';
+    const cacheKey = await makeCacheKey(body, question, model);
+    const nowSeconds = Math.floor(Date.now() / 1000);
+
+    if (Math.random() < 0.01) {
+      context.waitUntil(purgeExpiredCache(db, nowSeconds).catch(error => {
+        console.error('Expired cache purge failed', error);
+      }));
+    }
+
+    if (body.cache !== false) {
+      let cached: string | null;
+      try {
+        cached = await getCachedResponse(db, cacheKey, mode, nowSeconds);
+      } catch (error) {
+        console.error('AI cache read failed', error);
+        return jsonResponse({ error: '次数服务暂时不可用，请稍后重试' }, 503, headers);
+      }
+
+      if (cached) {
+        const noCharge: ChargeResult = { allowed: true, kind: 'none', units: 0 };
+        context.waitUntil(recordUsage(db, clientId, mode, true, noCharge).catch(error => {
+          console.error('Cache-hit usage recording failed', error);
+        }));
+        return cachedSseResponse(cached, sseHeaders(headers, 'HIT'));
+      }
+    }
+
+    const freeDailyLimit = parsePositiveInteger(
+      env.FREE_DAILY_LIMIT,
+      DEFAULT_FREE_DAILY_LIMIT,
+      100,
+    );
+    const compatibilityCost = parsePositiveInteger(
+      env.COMPATIBILITY_CREDIT_COST,
+      DEFAULT_COMPATIBILITY_COST,
+      100,
+    );
+
+    let charge: ChargeResult;
+    try {
+      charge = await chargeQuota(
+        db,
+        clientId,
+        mode,
+        freeDailyLimit,
+        compatibilityCost,
+      );
+    } catch (error) {
+      console.error('Quota charge failed', error);
+      return jsonResponse({ error: '次数服务暂时不可用，请稍后重试' }, 503, headers);
+    }
+
+    if (!charge.allowed) {
+      return jsonResponse({
+        error: '今日免费次数和付费次数均已用完，请充值次数或开通 VIP',
+        code: 'INSUFFICIENT_QUOTA',
+        remainingFree: charge.remainingFree ?? 0,
+        remainingCredits: charge.remainingCredits ?? 0,
+      }, 402, headers);
+    }
+
+    if (!env.DEEPSEEK_API_KEY) {
+      await refundQuota(db, clientId, charge);
+      return jsonResponse({ error: 'AI 服务尚未配置' }, 503, headers);
+    }
+
     let systemMessage: ChatMessage;
     try {
-      systemMessage = buildSystemMessage(body.chart);
-    } catch {
+      const knowledgeContext = buildKnowledgeContext(
+        body.chart,
+        body.secondaryChart,
+        question,
+        mode,
+      );
+      systemMessage = buildSystemMessage(body, knowledgeContext);
+    } catch (error) {
+      console.error('Knowledge or chart preparation failed', error);
+      await refundQuota(db, clientId, charge);
       return jsonResponse({ error: '命盘数据过大或无法解析' }, 413, headers);
     }
 
-    const upstream = await fetch('https://api.deepseek.com/chat/completions', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${env.DEEPSEEK_API_KEY}`,
-      },
-      body: JSON.stringify({
-        model: env.DEEPSEEK_MODEL || 'deepseek-v4-flash',
-        stream: true,
-        temperature: 0.45,
-        max_tokens: 4096,
-        messages: [systemMessage, ...(body.messages ?? [])],
-      }),
-    });
+    let upstream: Response;
+    try {
+      upstream = await fetch('https://api.deepseek.com/chat/completions', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${env.DEEPSEEK_API_KEY}`,
+        },
+        body: JSON.stringify({
+          model,
+          stream: true,
+          temperature: 0.45,
+          max_tokens: 4096,
+          messages: [systemMessage, ...(body.messages ?? [])],
+        }),
+      });
+    } catch (error) {
+      console.error('DeepSeek request failed before response', error);
+      await refundQuota(db, clientId, charge);
+      return jsonResponse({ error: 'AI 服务暂时不可用，请稍后重试' }, 502, headers);
+    }
 
     if (!upstream.ok || !upstream.body) {
       const detail = await upstream.text().catch(() => '');
       console.error('DeepSeek request failed', upstream.status, detail.slice(0, 1000));
+      await refundQuota(db, clientId, charge);
       return jsonResponse({ error: 'AI 服务暂时不可用，请稍后重试' }, 502, headers);
     }
 
-    return new Response(transformDeepSeekStream(upstream.body), {
+    const [clientStream, auditStream] = upstream.body.tee();
+    const cacheTtlSeconds = parsePositiveInteger(
+      env.AI_CACHE_TTL_SECONDS,
+      DEFAULT_CACHE_TTL_SECONDS,
+      MAX_CACHE_TTL_SECONDS,
+    );
+    context.waitUntil(finalizeCompletion({
+      db,
+      stream: auditStream,
+      clientId,
+      mode,
+      cacheKey,
+      cacheEnabled: body.cache !== false,
+      cacheTtlSeconds,
+      charge,
+    }));
+
+    return new Response(transformDeepSeekStream(clientStream), {
       status: 200,
-      headers: {
-        ...headers,
-        'Content-Type': 'text/event-stream; charset=utf-8',
-        'Cache-Control': 'no-cache, no-transform',
-        Connection: 'keep-alive',
-        'X-Content-Type-Options': 'nosniff',
-      },
+      headers: sseHeaders(headers, 'MISS', charge),
     });
   },
 };

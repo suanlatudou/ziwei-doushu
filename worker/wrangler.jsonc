@@ -9,7 +9,10 @@
   },
   "vars": {
     "DEEPSEEK_MODEL": "deepseek-v4-flash",
-    "ALLOWED_ORIGINS": "https://ziwei-doushu-5xd.pages.dev,https://wdyziweidoushu666.com"
+    "ALLOWED_ORIGINS": "https://ziwei-doushu-5xd.pages.dev,https://wdyziweidoushu666.com",
+    "FREE_DAILY_LIMIT": "3",
+    "COMPATIBILITY_CREDIT_COST": "2",
+    "AI_CACHE_TTL_SECONDS": "604800"
   },
   "ratelimits": [
     {

@@ -123,43 +123,58 @@ export async function chargeQuota(
   }
 
   const today = dayKey(now);
+  const unitCost = mode === 'compatibility'
+    ? Math.max(1, compatibilityCreditCost)
+    : 1;
   const freeUpdate = await db.prepare(`
     UPDATE ai_clients
     SET
       daily_date = ?,
-      daily_used = CASE WHEN daily_date = ? THEN daily_used + 1 ELSE 1 END,
+      daily_used = CASE WHEN daily_date = ? THEN daily_used + ? ELSE ? END,
       updated_at = CURRENT_TIMESTAMP
     WHERE client_id = ?
-      AND (daily_date <> ? OR daily_used < ?)
-  `).bind(today, today, clientId, today, freeDailyLimit).run();
+      AND (
+        (daily_date <> ? AND ? <= ?)
+        OR (daily_date = ? AND daily_used + ? <= ?)
+      )
+  `).bind(
+    today,
+    today,
+    unitCost,
+    unitCost,
+    clientId,
+    today,
+    unitCost,
+    freeDailyLimit,
+    today,
+    unitCost,
+    freeDailyLimit,
+  ).run();
 
   if (changes(freeUpdate) > 0) {
     const previousUsed = row?.daily_date === today ? row.daily_used : 0;
     return {
       allowed: true,
       kind: 'free',
-      units: 1,
-      remainingFree: Math.max(0, freeDailyLimit - previousUsed - 1),
+      units: unitCost,
+      remainingFree: Math.max(0, freeDailyLimit - previousUsed - unitCost),
       remainingCredits: row?.credits ?? 0,
     };
   }
 
-  const creditCost = mode === 'compatibility'
-    ? Math.max(1, compatibilityCreditCost)
-    : 1;
   const creditUpdate = await db.prepare(`
     UPDATE ai_clients
     SET credits = credits - ?, updated_at = CURRENT_TIMESTAMP
     WHERE client_id = ? AND credits >= ?
-  `).bind(creditCost, clientId, creditCost).run();
+  `).bind(unitCost, clientId, unitCost).run();
 
   if (changes(creditUpdate) > 0) {
     return {
       allowed: true,
       kind: 'credit',
-      units: creditCost,
+      units: unitCost,
       remainingFree: 0,
-      remainingCredits: Math.max(0, (row?.credits ?? creditCost) - creditCost),
+      remainingCredits: Math.max(0, (row?.credits ?? unitCost) - unitCost),
     };
   }
 
@@ -184,10 +199,13 @@ export async function refundQuota(
     const today = dayKey(now);
     await db.prepare(`
       UPDATE ai_clients
-      SET daily_used = CASE WHEN daily_used > 0 THEN daily_used - 1 ELSE 0 END,
+      SET daily_used = CASE
+            WHEN daily_used >= ? THEN daily_used - ?
+            ELSE 0
+          END,
           updated_at = CURRENT_TIMESTAMP
       WHERE client_id = ? AND daily_date = ?
-    `).bind(clientId, today).run();
+    `).bind(charge.units, charge.units, clientId, today).run();
     return;
   }
 
