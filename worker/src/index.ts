@@ -13,6 +13,12 @@ import {
   type ChargeResult,
   type D1Database,
 } from './storage';
+import {
+  handleAfdianWebhook,
+  handleBillingSession,
+  hashBillingClientId,
+  isValidBillingClientId,
+} from './billing';
 
 interface RateLimitBinding {
   limit(options: { key: string }): Promise<{ success: boolean }>;
@@ -53,6 +59,8 @@ interface InterpretRequest {
 }
 
 const DEFAULT_ALLOWED_ORIGINS = [
+  'https://metisziwei.com',
+  'https://www.metisziwei.com',
   'https://ziwei-doushu-5xd.pages.dev',
   'http://localhost:3000',
   'http://127.0.0.1:3000',
@@ -75,6 +83,13 @@ const NO_CHARGE: ChargeResult = {
 
 function jsonResponse(data: unknown, status: number, headers: HeadersInit): Response {
   return Response.json(data, { status, headers });
+}
+
+function mergeResponseHeaders(response: Response, extraHeaders: HeadersInit): Response {
+  const merged = new Response(response.body, response);
+  const headers = new Headers(extraHeaders);
+  headers.forEach((value, key) => merged.headers.set(key, value));
+  return merged;
 }
 
 function parsePositiveInteger(
@@ -122,7 +137,6 @@ function corsHeaders(origin: string | null, allowedOrigins: Set<string>): Record
   if (origin && isAllowedOrigin(origin, allowedOrigins)) {
     headers['Access-Control-Allow-Origin'] = origin;
   }
-
   return headers;
 }
 
@@ -192,10 +206,15 @@ async function resolveSubjectKey(request: Request, body: InterpretRequest): Prom
   const ip = request.headers.get('CF-Connecting-IP') || 'unknown';
   const userAgent = request.headers.get('User-Agent') || 'unknown';
 
-  // 浏览器生成的 clientId 只能用于无 CF-IP 的本地开发兜底，不能作为线上额度主体，
-  // 否则用户清空 localStorage 或随机生成 ID 即可绕过次数和限流。
+  // 免费次数主体仍以网络环境为主，避免通过清空 localStorage 无限刷新免费额度。
+  // clientId 只在本地开发无 CF-IP 时兜底；线上 clientId 仅用于付费钱包。
   const localFallback = ip === 'unknown' ? (body.clientId || 'anonymous') : '';
   return `subject:${await sha256Hex(`${ip}|${userAgent}|${localFallback}`)}`;
+}
+
+async function resolveWalletClientHash(clientId: string | undefined): Promise<string | undefined> {
+  if (!clientId || !isValidBillingClientId(clientId)) return undefined;
+  return hashBillingClientId(clientId);
 }
 
 function stripChartIdentity(value: unknown): unknown {
@@ -233,7 +252,6 @@ function stableJson(value: unknown): string {
     }
     return item;
   };
-
   return JSON.stringify(normalize(value));
 }
 
@@ -249,7 +267,6 @@ async function makeCacheKey(
     secondaryChart: body.mode === 'compatibility'
       ? stripChartIdentity(body.secondaryChart)
       : undefined,
-    // 必须包含完整对话，而不是只放最后一个问题；否则不同追问上下文会错误复用缓存。
     messages: body.messages,
     model,
     thinkingType,
@@ -487,8 +504,22 @@ export default {
         ok: true,
         service: 'ziwei-ai-api',
         database: Boolean(env.DB),
+        billing: Boolean(env.DB),
         knowledgeVersion: KNOWLEDGE_VERSION,
       }, 200, headers);
+    }
+
+    // 爱发电服务器回调没有浏览器 Origin，不使用浏览器 CORS 限制；安全性由 RSA 验签保证。
+    if (url.pathname === '/api/afdian/webhook') {
+      return handleAfdianWebhook(request, env);
+    }
+
+    if (url.pathname === '/api/billing/session') {
+      if (origin && !isAllowedOrigin(origin, allowedOrigins)) {
+        return jsonResponse({ error: '当前来源未获授权' }, 403, headers);
+      }
+      const response = await handleBillingSession(request, env);
+      return mergeResponseHeaders(response, headers);
     }
 
     if (url.pathname !== '/api/interpret') {
@@ -570,7 +601,6 @@ export default {
           return cachedSseResponse(cached, sseHeaders(headers, 'HIT', NO_CHARGE));
         }
       } catch (error) {
-        // 缓存故障不应让 AI 服务整体不可用。
         console.error('AI cache read failed; continuing without cache', error);
       }
     }
@@ -585,6 +615,7 @@ export default {
       DEFAULT_COMPATIBILITY_COST,
       100,
     );
+    const walletClientHash = await resolveWalletClientHash(body.clientId);
 
     let charge: ChargeResult = NO_CHARGE;
     if (db) {
@@ -595,6 +626,7 @@ export default {
           mode,
           freeDailyLimit,
           compatibilityCost,
+          walletClientHash,
         );
       } catch (error) {
         console.error('Quota charge failed', error);
