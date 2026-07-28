@@ -4,6 +4,7 @@
   "main": "src/index.ts",
   "compatibility_date": "2026-07-26",
   "workers_dev": true,
+  "keep_vars": true,
   "observability": {
     "enabled": true
   },
@@ -12,9 +13,16 @@
     "DEEPSEEK_THINKING": "disabled",
     "ALLOWED_ORIGINS": "https://metisziwei.com,https://www.metisziwei.com,https://ziwei-doushu-5xd.pages.dev",
     "FREE_DAILY_LIMIT": "3",
-    "COMPATIBILITY_CREDIT_COST": "2",
+    "COMPATIBILITY_CREDIT_COST": "1",
     "AI_CACHE_TTL_SECONDS": "604800"
   },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "ziwei-ai-db",
+      "database_id": "REPLACE_WITH_CLOUDFLARE_D1_DATABASE_ID"
+    }
+  ],
   "ratelimits": [
     {
       "name": "RATE_LIMITER",
