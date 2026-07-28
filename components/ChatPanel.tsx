@@ -8,6 +8,8 @@ interface ChatPanelProps {
   chart: ZiweiChart;
 }
 
+const AFDIAN_ITEM_URL = 'https://www.ifdian.net/item/e4a616f28a5711f1a6115254001e7c00';
+
 const PRESET_QUESTIONS = [
   '我的整体命格如何？性格特点是什么？',
   '我的感情婚姻运势如何？',
@@ -73,8 +75,26 @@ export default function ChatPanel({ chart }: ChatPanelProps) {
   return (
     <div className="flex flex-col h-full rounded-xl overflow-hidden card-glass">
       <div className="px-4 py-3 flex-shrink-0" style={{ borderBottom: '1px solid var(--t-border)' }}>
-        <h3 className="text-xs font-medium tracking-widest" style={{ color: 'var(--t-gold)' }}>AI 命盘解读</h3>
-        <p className="text-[10px] mt-0.5" style={{ color: 'var(--t-faint)' }}>传统文化参考 · AI 辅助解析</p>
+        <div className="flex items-center justify-between gap-3">
+          <div>
+            <h3 className="text-xs font-medium tracking-widest" style={{ color: 'var(--t-gold)' }}>AI 命盘解读</h3>
+            <p className="text-[10px] mt-0.5" style={{ color: 'var(--t-faint)' }}>传统文化参考 · AI 辅助解析</p>
+          </div>
+          <a
+            href={AFDIAN_ITEM_URL}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="shrink-0 rounded-lg px-3 py-1.5 text-[10px] font-medium transition-all"
+            style={{
+              color: 'var(--t-gold)',
+              border: '1px solid rgba(212,168,67,0.28)',
+              background: 'rgba(212,168,67,0.10)',
+            }}
+            aria-label="前往爱发电购买 10 次 AI 解读"
+          >
+            购买 10 次
+          </a>
+        </div>
       </div>
 
       <div ref={scrollRef} className="flex-1 overflow-y-auto p-4 space-y-3 min-h-0">
