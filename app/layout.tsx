@@ -1,20 +1,27 @@
 import type { Metadata } from 'next';
 import './globals.css';
 import { ThemeProvider } from '@/components/ThemeProvider';
-import { Analytics } from '@vercel/analytics/next';
-import { SpeedInsights } from '@vercel/speed-insights/next';
 import { SITE_URL } from '@/lib/site';
 
-const title = '紫微命盘 · 紫微斗数排盘与 AI 解读';
-const description = '提供紫微斗数命盘、格局、大限流年、感情事业财运等传统文化参考与 AI 辅助解读。';
+const title = '紫微命盘 · 紫微斗数排盘与 AI 辅助解读';
+const description = '提供紫微斗数排盘、格局与流年等传统文化学习参考，以及审慎的 AI 辅助解读。';
 
 export const metadata: Metadata = {
   title,
   description,
+  applicationName: '紫微命盘',
+  authors: [{ name: '紫微命盘项目' }],
+  creator: '紫微命盘项目',
+  publisher: '紫微命盘项目',
+  category: '传统文化学习工具',
   keywords: '紫微斗数, 紫微命盘, 排盘, 命盘解读, 14主星, 12宫位, 大限流年, 合盘',
   metadataBase: new URL(SITE_URL),
   alternates: {
     canonical: '/',
+  },
+  robots: {
+    index: true,
+    follow: true,
   },
   openGraph: {
     title,
@@ -41,11 +48,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
         <script dangerouslySetInnerHTML={{ __html: `(function(){try{var t=localStorage.getItem('ziwei-theme');if(t==='light'||t==='dark')document.documentElement.setAttribute('data-theme',t);else document.documentElement.setAttribute('data-theme','dark');}catch(e){}})();` }} />
       </head>
       <body className="min-h-screen">
-        <ThemeProvider>
-          {children}
-        </ThemeProvider>
-        <Analytics />
-        <SpeedInsights />
+        <ThemeProvider>{children}</ThemeProvider>
       </body>
     </html>
   );
