@@ -1,4 +1,4 @@
-import type { D1Database } from './storage';
+import { getWalletCredits, type D1Database } from './storage';
 
 export interface BillingEnv {
   DB?: D1Database;
@@ -6,6 +6,12 @@ export interface BillingEnv {
 
 const CLIENT_ID_RE = /^[a-zA-Z0-9._:-]{8,128}$/;
 const CUSTOM_ORDER_PREFIX = 'ziwei:';
+
+const AFDIAN_PACKAGES: Record<string, { credits: number; amount: string }> = {
+  '6f5e5c788a3511f1af625254001e7c00': { credits: 1, amount: '1.88' },
+  'aa3926f88a3411f1aa295254001e7c00': { credits: 3, amount: '4.88' },
+  'e4a616f28a5711f1a6115254001e7c00': { credits: 10, amount: '12.88' },
+};
 
 const AFDIAN_PUBLIC_KEY_PEM = `-----BEGIN PUBLIC KEY-----
 MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAwwdaCg1Bt+UKZKs0R54y
@@ -58,7 +64,7 @@ function json(data: unknown, status = 200): Response {
   });
 }
 
-function isValidClientId(clientId: string): boolean {
+export function isValidBillingClientId(clientId: string): boolean {
   return CLIENT_ID_RE.test(clientId);
 }
 
@@ -67,10 +73,9 @@ async function sha256Hex(value: string): Promise<string> {
   return Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, '0')).join('');
 }
 
-async function resolveSubjectKey(request: Request): Promise<string> {
-  const ip = request.headers.get('CF-Connecting-IP') || 'unknown';
-  const userAgent = request.headers.get('User-Agent') || 'unknown';
-  return `subject:${await sha256Hex(`${ip}|${userAgent}|`)}`;
+export async function hashBillingClientId(clientId: string): Promise<string> {
+  if (!isValidBillingClientId(clientId)) throw new Error('INVALID_CLIENT_ID');
+  return sha256Hex(clientId);
 }
 
 function base64ToBytes(value: string): Uint8Array {
@@ -119,14 +124,16 @@ async function verifyAfdianSignature(order: AfdianOrder, signature: string): Pro
   }
 }
 
-function packageCreditsForAmount(amount: string): number | null {
-  const parsed = Number(amount);
-  if (!Number.isFinite(parsed)) return null;
-  const normalized = parsed.toFixed(2);
-  if (normalized === '1.88') return 1;
-  if (normalized === '4.88') return 3;
-  if (normalized === '12.88') return 10;
-  return null;
+function resolvePackage(order: AfdianOrder): { credits: number; amount: string } | null {
+  const planId = order.plan_id ?? '';
+  const packageConfig = AFDIAN_PACKAGES[planId];
+  if (!packageConfig) return null;
+
+  const parsedAmount = Number(order.total_amount ?? '');
+  if (!Number.isFinite(parsedAmount) || parsedAmount.toFixed(2) !== packageConfig.amount) {
+    return null;
+  }
+  return packageConfig;
 }
 
 async function parseJsonBody<T>(request: Request, maxChars = 32_000): Promise<T | null> {
@@ -145,90 +152,24 @@ export async function handleBillingSession(request: Request, env: BillingEnv): P
 
   const body = await parseJsonBody<BillingSessionBody>(request, 4_000);
   const clientId = typeof body?.clientId === 'string' ? body.clientId.trim() : '';
-  if (!isValidClientId(clientId)) return json({ error: '客户端标识无效' }, 400);
+  if (!isValidBillingClientId(clientId)) return json({ error: '客户端标识无效' }, 400);
 
-  const db = env.DB;
-  const clientHash = await sha256Hex(clientId);
-  const subjectKey = await resolveSubjectKey(request);
-  const previous = await db.prepare(`
-    SELECT subject_key
-    FROM billing_clients
-    WHERE client_hash = ?
-    LIMIT 1
-  `).bind(clientHash).first<{ subject_key: string }>();
-
-  const statements = [
-    db.prepare(`
-      INSERT INTO ai_clients (client_id)
-      VALUES (?)
-      ON CONFLICT(client_id) DO NOTHING
-    `).bind(subjectKey),
-    db.prepare(`
+  const clientHash = await hashBillingClientId(clientId);
+  try {
+    await env.DB.prepare(`
       INSERT INTO billing_wallets (client_hash, credits)
       VALUES (?, 0)
       ON CONFLICT(client_hash) DO NOTHING
-    `).bind(clientHash),
-  ];
+    `).bind(clientHash).run();
 
-  if (previous?.subject_key && previous.subject_key !== subjectKey) {
-    statements.push(
-      db.prepare(`
-        UPDATE ai_clients
-        SET credits = credits + COALESCE((
-              SELECT credits FROM ai_clients WHERE client_id = ?
-            ), 0),
-            updated_at = CURRENT_TIMESTAMP
-        WHERE client_id = ?
-      `).bind(previous.subject_key, subjectKey),
-      db.prepare(`
-        UPDATE ai_clients
-        SET credits = 0, updated_at = CURRENT_TIMESTAMP
-        WHERE client_id = ?
-      `).bind(previous.subject_key),
-    );
-  }
-
-  statements.push(
-    db.prepare(`
-      UPDATE ai_clients
-      SET credits = credits + COALESCE((
-            SELECT credits FROM billing_wallets WHERE client_hash = ?
-          ), 0),
-          updated_at = CURRENT_TIMESTAMP
-      WHERE client_id = ?
-    `).bind(clientHash, subjectKey),
-    db.prepare(`
-      UPDATE billing_wallets
-      SET credits = 0, updated_at = CURRENT_TIMESTAMP
-      WHERE client_hash = ?
-    `).bind(clientHash),
-    db.prepare(`
-      INSERT INTO billing_clients (client_hash, subject_key, updated_at)
-      VALUES (?, ?, CURRENT_TIMESTAMP)
-      ON CONFLICT(client_hash) DO UPDATE SET
-        subject_key = excluded.subject_key,
-        updated_at = CURRENT_TIMESTAMP
-    `).bind(clientHash, subjectKey),
-  );
-
-  try {
-    await db.batch(statements);
+    return json({
+      ok: true,
+      paidCredits: await getWalletCredits(env.DB, clientHash),
+    });
   } catch (error) {
-    console.error('Billing session sync failed', error);
-    return json({ error: '付费次数同步失败，请稍后重试' }, 503);
+    console.error('Billing session read failed', error);
+    return json({ error: '付费次数查询失败，请稍后重试' }, 503);
   }
-
-  const row = await db.prepare(`
-    SELECT credits
-    FROM ai_clients
-    WHERE client_id = ?
-    LIMIT 1
-  `).bind(subjectKey).first<{ credits: number }>();
-
-  return json({
-    ok: true,
-    paidCredits: Math.max(0, Number(row?.credits ?? 0)),
-  });
 }
 
 export async function handleAfdianWebhook(request: Request, env: BillingEnv): Promise<Response> {
@@ -256,7 +197,7 @@ export async function handleAfdianWebhook(request: Request, env: BillingEnv): Pr
   }
 
   const clientId = customOrderId.slice(CUSTOM_ORDER_PREFIX.length);
-  if (!isValidClientId(clientId)) {
+  if (!isValidBillingClientId(clientId)) {
     return json({ ec: 422, em: 'invalid custom_order_id' }, 422);
   }
 
@@ -264,12 +205,12 @@ export async function handleAfdianWebhook(request: Request, env: BillingEnv): Pr
   const userId = order.user_id ?? '';
   const planId = order.plan_id ?? '';
   const totalAmount = order.total_amount ?? '';
-  const packageCredits = packageCreditsForAmount(totalAmount);
-  if (!outTradeNo || !userId || packageCredits === null) {
+  const packageConfig = resolvePackage(order);
+  if (!outTradeNo || !userId || !packageConfig) {
     return json({ ec: 422, em: 'unsupported order' }, 422);
   }
 
-  const clientHash = await sha256Hex(clientId);
+  const clientHash = await hashBillingClientId(clientId);
   try {
     await env.DB.prepare(`
       INSERT OR IGNORE INTO afdian_orders (
@@ -288,7 +229,7 @@ export async function handleAfdianWebhook(request: Request, env: BillingEnv): Pr
       outTradeNo,
       clientHash,
       customOrderId,
-      packageCredits,
+      packageConfig.credits,
       totalAmount,
       userId,
       planId,
@@ -304,6 +245,6 @@ export async function handleAfdianWebhook(request: Request, env: BillingEnv): Pr
 }
 
 export function buildAfdianCustomOrderId(clientId: string): string {
-  if (!isValidClientId(clientId)) throw new Error('INVALID_CLIENT_ID');
+  if (!isValidBillingClientId(clientId)) throw new Error('INVALID_CLIENT_ID');
   return `${CUSTOM_ORDER_PREFIX}${clientId}`;
 }
