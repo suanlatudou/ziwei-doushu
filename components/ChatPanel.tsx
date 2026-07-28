@@ -12,16 +12,19 @@ const AFDIAN_PACKAGES = [
   {
     credits: 1,
     label: '1 次',
+    price: '¥1.88',
     url: 'https://www.ifdian.net/item/6f5e5c788a3511f1af625254001e7c00',
   },
   {
     credits: 3,
     label: '3 次',
+    price: '¥4.88',
     url: 'https://www.ifdian.net/item/aa3926f88a3411f1aa295254001e7c00',
   },
   {
     credits: 10,
     label: '10 次',
+    price: '¥12.88',
     url: 'https://www.ifdian.net/item/e4a616f28a5711f1a6115254001e7c00',
     recommended: true,
   },
@@ -97,7 +100,7 @@ export default function ChatPanel({ chart }: ChatPanelProps) {
             <h3 className="text-xs font-medium tracking-widest" style={{ color: 'var(--t-gold)' }}>AI 命盘解读</h3>
             <p className="text-[10px] mt-0.5" style={{ color: 'var(--t-faint)' }}>传统文化参考 · AI 辅助解析</p>
           </div>
-          <div className="flex items-center gap-1.5" aria-label="购买 AI 解读次数">
+          <div className="flex flex-wrap items-center gap-1.5" aria-label="购买 AI 解读次数">
             {AFDIAN_PACKAGES.map(pkg => (
               <a
                 key={pkg.credits}
@@ -114,9 +117,9 @@ export default function ChatPanel({ chart }: ChatPanelProps) {
                     ? 'rgba(212,168,67,0.16)'
                     : 'rgba(212,168,67,0.07)',
                 }}
-                aria-label={`前往爱发电购买 ${pkg.credits} 次 AI 解读`}
+                aria-label={`前往爱发电购买 ${pkg.credits} 次 AI 解读，价格 ${pkg.price}`}
               >
-                {pkg.label}{pkg.recommended ? ' · 推荐' : ''}
+                {pkg.label} · {pkg.price}{pkg.recommended ? ' · 推荐' : ''}
               </a>
             ))}
           </div>
