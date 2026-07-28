@@ -13,13 +13,13 @@ const AFDIAN_PACKAGES = [
     credits: 1,
     label: '1 次',
     price: '¥1.88',
-    url: 'https://www.ifdian.net/item/6f5e5c788a3511f1af625254001e7c00',
+    url: 'https://www.ifdian.net/item/aa3926f88a3411f1aa295254001e7c00',
   },
   {
     credits: 3,
     label: '3 次',
     price: '¥4.88',
-    url: 'https://www.ifdian.net/item/aa3926f88a3411f1aa295254001e7c00',
+    url: 'https://www.ifdian.net/item/6f5e5c788a3511f1af625254001e7c00',
   },
   {
     credits: 10,
