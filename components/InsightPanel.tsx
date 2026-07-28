@@ -1,8 +1,13 @@
 'use client';
-import { useState, useRef, useEffect } from 'react';
+import { useState, useRef, useEffect, useCallback } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import type { ZiweiChart, Palace } from '@/lib/ziwei/types';
-import { streamAiInterpret } from '@/lib/ai/client';
+import {
+  buildAfdianPurchaseUrl,
+  getBillingBalance,
+  isAfdianCheckoutUrl,
+  streamAiInterpret,
+} from '@/lib/ai/client';
 import type { TimeView } from './TimeNav';
 
 interface Message {
@@ -22,6 +27,30 @@ interface InsightPanelProps {
   selectedPalace?: Palace | null;
   selectedSiHua?: SelectedSiHua | null;
 }
+
+const AFDIAN_PACKAGES = [
+  {
+    credits: 1 as const,
+    label: '1 次',
+    price: '¥1.88',
+    checkoutUrl: process.env.NEXT_PUBLIC_AFDIAN_CHECKOUT_1,
+    recommended: false,
+  },
+  {
+    credits: 3 as const,
+    label: '3 次',
+    price: '¥4.88',
+    checkoutUrl: process.env.NEXT_PUBLIC_AFDIAN_CHECKOUT_3,
+    recommended: false,
+  },
+  {
+    credits: 10 as const,
+    label: '10 次',
+    price: '¥12.88',
+    checkoutUrl: process.env.NEXT_PUBLIC_AFDIAN_CHECKOUT_10,
+    recommended: true,
+  },
+] as const;
 
 const TOPICS = [
   { key: 'overview',     label: '命格' },
@@ -188,6 +217,8 @@ export default function InsightPanel({ chart, selectedPalace, selectedSiHua }: I
   const [input, setInput] = useState('');
   const [loading, setLoading] = useState(false);
   const [activeTopic, setActiveTopic] = useState<string>('overview');
+  const [paidCredits, setPaidCredits] = useState<number | null>(null);
+  const [billingAvailable, setBillingAvailable] = useState(true);
   const messagesRef = useRef<Message[]>([]); // always-current copy for closures
   const loadingRef = useRef(false);
   const autoLoaded = useRef(false);
@@ -198,6 +229,33 @@ export default function InsightPanel({ chart, selectedPalace, selectedSiHua }: I
   // Keep refs in sync
   useEffect(() => { messagesRef.current = messages; }, [messages]);
   useEffect(() => { loadingRef.current = loading; }, [loading]);
+
+  const refreshBalance = useCallback(async () => {
+    try {
+      const balance = await getBillingBalance();
+      setPaidCredits(balance.paidCredits);
+      setBillingAvailable(true);
+    } catch (error) {
+      console.error('Billing balance refresh failed', error);
+      setBillingAvailable(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void refreshBalance();
+  }, [refreshBalance]);
+
+  useEffect(() => {
+    const refreshWhenVisible = () => {
+      if (document.visibilityState === 'visible') void refreshBalance();
+    };
+    window.addEventListener('focus', refreshWhenVisible);
+    document.addEventListener('visibilitychange', refreshWhenVisible);
+    return () => {
+      window.removeEventListener('focus', refreshWhenVisible);
+      document.removeEventListener('visibilitychange', refreshWhenVisible);
+    };
+  }, [refreshBalance]);
 
   // Auto-scroll
   useEffect(() => {
@@ -289,6 +347,9 @@ ${selectedSiHua.starName}化${selectedSiHua.siHua}落在【${palaceName}】，�
             return updated;
           });
         },
+        onMeta: meta => {
+          if (meta.remainingCredits !== undefined) setPaidCredits(meta.remainingCredits);
+        },
       });
     } catch (error) {
       const errorMessage = error instanceof Error
@@ -308,6 +369,7 @@ ${selectedSiHua.starName}化${selectedSiHua.siHua}落在【${palaceName}】，�
     } finally {
       setLoading(false);
       loadingRef.current = false;
+      void refreshBalance();
     }
   };
 
@@ -338,8 +400,63 @@ ${selectedSiHua.starName}化${selectedSiHua.siHua}落在【${palaceName}】，�
     sendMessage(input);
   };
 
+  const openPurchase = (pkg: typeof AFDIAN_PACKAGES[number]) => {
+    const purchase = buildAfdianPurchaseUrl({
+      credits: pkg.credits,
+      checkoutUrl: pkg.checkoutUrl,
+    });
+    if (!purchase.automaticCredit || !purchase.url) return;
+    window.open(purchase.url, '_blank', 'noopener,noreferrer');
+  };
+
   return (
     <div className="flex flex-col h-full rounded-xl overflow-hidden card-glass">
+
+      {/* ── Billing and purchase ── */}
+      <div className="flex-shrink-0 px-3 py-2.5" style={{ borderBottom: '1px solid var(--t-border)' }}>
+        <div className="flex flex-col gap-2">
+          <div className="flex items-center justify-between gap-2">
+            <div>
+              <div className="text-[10px] font-medium tracking-widest" style={{ color: 'var(--t-gold)' }}>
+                AI 命盘解读
+              </div>
+              <div className="mt-0.5 text-[9px]" style={{ color: 'var(--t-faint)' }}>
+                {billingAvailable && paidCredits !== null
+                  ? `付费余额 ${paidCredits} 次`
+                  : billingAvailable
+                    ? '次数服务连接中'
+                    : '次数服务暂不可用'}
+              </div>
+            </div>
+            <div className="flex flex-wrap justify-end gap-1">
+              {AFDIAN_PACKAGES.map(pkg => {
+                const enabled = isAfdianCheckoutUrl(pkg.checkoutUrl);
+                return (
+                  <button
+                    key={pkg.credits}
+                    type="button"
+                    onClick={() => openPurchase(pkg)}
+                    disabled={!enabled}
+                    className="rounded-lg px-2 py-1 text-[9px] font-medium transition-all disabled:cursor-not-allowed disabled:opacity-35"
+                    style={{
+                      color: 'var(--t-gold)',
+                      border: pkg.recommended
+                        ? '1px solid rgba(212,168,67,0.48)'
+                        : '1px solid rgba(212,168,67,0.24)',
+                      background: pkg.recommended
+                        ? 'rgba(212,168,67,0.16)'
+                        : 'rgba(212,168,67,0.07)',
+                    }}
+                    title={enabled ? `${pkg.label}购买后自动到账` : '自动到账尚未配置'}
+                  >
+                    {pkg.label} · {pkg.price} · {enabled ? '自动到账' : '待配置'}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        </div>
+      </div>
 
       {/* ── Topic buttons ── */}
       <div className="flex-shrink-0 px-2 pt-2.5 pb-2" style={{ borderBottom: '1px solid var(--t-border)' }}>
