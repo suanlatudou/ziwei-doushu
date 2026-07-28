@@ -7,10 +7,10 @@ export interface BillingEnv {
 const CLIENT_ID_RE = /^[a-zA-Z0-9._:-]{8,128}$/;
 const CUSTOM_ORDER_PREFIX = 'ziwei:';
 
-const AFDIAN_PACKAGES: Record<string, { credits: number; amount: string }> = {
-  '6f5e5c788a3511f1af625254001e7c00': { credits: 1, amount: '1.88' },
-  'aa3926f88a3411f1aa295254001e7c00': { credits: 3, amount: '4.88' },
-  'e4a616f28a5711f1a6115254001e7c00': { credits: 10, amount: '12.88' },
+const PACKAGE_AMOUNTS: Record<number, string> = {
+  1: '1.88',
+  3: '4.88',
+  10: '12.88',
 };
 
 const AFDIAN_PUBLIC_KEY_PEM = `-----BEGIN PUBLIC KEY-----
@@ -27,12 +27,6 @@ interface BillingSessionBody {
   clientId: string;
 }
 
-interface AfdianSkuDetail {
-  sku_id?: string;
-  count?: number;
-  name?: string;
-}
-
 interface AfdianOrder {
   out_trade_no?: string;
   custom_order_id?: string;
@@ -41,7 +35,6 @@ interface AfdianOrder {
   total_amount?: string;
   status?: number;
   product_type?: number;
-  sku_detail?: AfdianSkuDetail[];
 }
 
 interface AfdianWebhookBody {
@@ -124,16 +117,21 @@ async function verifyAfdianSignature(order: AfdianOrder, signature: string): Pro
   }
 }
 
-function resolvePackage(order: AfdianOrder): { credits: number; amount: string } | null {
-  const planId = order.plan_id ?? '';
-  const packageConfig = AFDIAN_PACKAGES[planId];
-  if (!packageConfig) return null;
+function parseCustomOrderId(value: string): { clientId: string; credits: number } | null {
+  if (!value.startsWith(CUSTOM_ORDER_PREFIX)) return null;
+  const payload = value.slice(CUSTOM_ORDER_PREFIX.length);
+  const separator = payload.lastIndexOf(':');
+  if (separator <= 0) return null;
 
-  const parsedAmount = Number(order.total_amount ?? '');
-  if (!Number.isFinite(parsedAmount) || parsedAmount.toFixed(2) !== packageConfig.amount) {
-    return null;
-  }
-  return packageConfig;
+  const clientId = payload.slice(0, separator);
+  const credits = Number.parseInt(payload.slice(separator + 1), 10);
+  if (!isValidBillingClientId(clientId) || !PACKAGE_AMOUNTS[credits]) return null;
+  return { clientId, credits };
+}
+
+function amountMatchesPackage(amount: string | undefined, credits: number): boolean {
+  const parsed = Number(amount ?? '');
+  return Number.isFinite(parsed) && parsed.toFixed(2) === PACKAGE_AMOUNTS[credits];
 }
 
 async function parseJsonBody<T>(request: Request, maxChars = 32_000): Promise<T | null> {
@@ -191,26 +189,24 @@ export async function handleAfdianWebhook(request: Request, env: BillingEnv): Pr
     return json({ ec: 200, em: '' });
   }
 
-  const customOrderId = order.custom_order_id ?? '';
-  if (!customOrderId.startsWith(CUSTOM_ORDER_PREFIX)) {
+  const customOrder = parseCustomOrderId(order.custom_order_id ?? '');
+  if (!customOrder) {
     return json({ ec: 200, em: '' });
   }
 
-  const clientId = customOrderId.slice(CUSTOM_ORDER_PREFIX.length);
-  if (!isValidBillingClientId(clientId)) {
-    return json({ ec: 422, em: 'invalid custom_order_id' }, 422);
+  if (!amountMatchesPackage(order.total_amount, customOrder.credits)) {
+    return json({ ec: 422, em: 'package amount mismatch' }, 422);
   }
 
   const outTradeNo = order.out_trade_no ?? '';
   const userId = order.user_id ?? '';
   const planId = order.plan_id ?? '';
   const totalAmount = order.total_amount ?? '';
-  const packageConfig = resolvePackage(order);
-  if (!outTradeNo || !userId || !packageConfig) {
+  if (!outTradeNo || !userId) {
     return json({ ec: 422, em: 'unsupported order' }, 422);
   }
 
-  const clientHash = await hashBillingClientId(clientId);
+  const clientHash = await hashBillingClientId(customOrder.clientId);
   try {
     await env.DB.prepare(`
       INSERT OR IGNORE INTO afdian_orders (
@@ -228,8 +224,8 @@ export async function handleAfdianWebhook(request: Request, env: BillingEnv): Pr
     `).bind(
       outTradeNo,
       clientHash,
-      customOrderId,
-      packageConfig.credits,
+      order.custom_order_id ?? '',
+      customOrder.credits,
       totalAmount,
       userId,
       planId,
@@ -244,7 +240,9 @@ export async function handleAfdianWebhook(request: Request, env: BillingEnv): Pr
   return json({ ec: 200, em: '' });
 }
 
-export function buildAfdianCustomOrderId(clientId: string): string {
-  if (!isValidBillingClientId(clientId)) throw new Error('INVALID_CLIENT_ID');
-  return `${CUSTOM_ORDER_PREFIX}${clientId}`;
+export function buildAfdianCustomOrderId(clientId: string, credits: number): string {
+  if (!isValidBillingClientId(clientId) || !PACKAGE_AMOUNTS[credits]) {
+    throw new Error('INVALID_PURCHASE');
+  }
+  return `${CUSTOM_ORDER_PREFIX}${clientId}:${credits}`;
 }
