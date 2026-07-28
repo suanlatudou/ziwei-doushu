@@ -1,5 +1,5 @@
 export type AiMode = 'chart' | 'compatibility';
-export type ChargedKind = 'none' | 'free' | 'credit' | 'vip';
+export type ChargedKind = 'none' | 'free' | 'credit' | 'wallet' | 'vip';
 
 export interface D1RunResult {
   success?: boolean;
@@ -25,6 +25,7 @@ export interface ChargeResult {
   units: number;
   remainingFree?: number;
   remainingCredits?: number;
+  walletClientHash?: string;
 }
 
 interface ClientRow {
@@ -37,6 +38,10 @@ interface ClientRow {
 interface CacheRow {
   response_text: string;
   expires_at: number;
+}
+
+interface WalletRow {
+  credits: number;
 }
 
 function changes(result: D1RunResult): number {
@@ -94,12 +99,27 @@ export async function saveCachedResponse(
   `).bind(cacheKey, mode, responseText, expiresAt).run();
 }
 
+export async function getWalletCredits(
+  db: D1Database,
+  walletClientHash: string,
+): Promise<number> {
+  const row = await db.prepare(`
+    SELECT credits
+    FROM billing_wallets
+    WHERE client_hash = ?
+    LIMIT 1
+  `).bind(walletClientHash).first<WalletRow>();
+
+  return Math.max(0, Number(row?.credits ?? 0));
+}
+
 export async function chargeQuota(
   db: D1Database,
   clientId: string,
   mode: AiMode,
   freeDailyLimit: number,
   compatibilityCreditCost: number,
+  walletClientHash?: string,
   now = new Date(),
 ): Promise<ChargeResult> {
   await ensureClient(db, clientId);
@@ -118,7 +138,9 @@ export async function chargeQuota(
       kind: 'vip',
       units: 0,
       remainingFree: Math.max(0, freeDailyLimit - (row.daily_date === dayKey(now) ? row.daily_used : 0)),
-      remainingCredits: row.credits,
+      remainingCredits: walletClientHash
+        ? await getWalletCredits(db, walletClientHash)
+        : row.credits,
     };
   }
 
@@ -158,8 +180,29 @@ export async function chargeQuota(
       kind: 'free',
       units: unitCost,
       remainingFree: Math.max(0, freeDailyLimit - previousUsed - unitCost),
-      remainingCredits: row?.credits ?? 0,
+      remainingCredits: walletClientHash
+        ? await getWalletCredits(db, walletClientHash)
+        : row?.credits ?? 0,
     };
+  }
+
+  if (walletClientHash) {
+    const walletUpdate = await db.prepare(`
+      UPDATE billing_wallets
+      SET credits = credits - ?, updated_at = CURRENT_TIMESTAMP
+      WHERE client_hash = ? AND credits >= ?
+    `).bind(unitCost, walletClientHash, unitCost).run();
+
+    if (changes(walletUpdate) > 0) {
+      return {
+        allowed: true,
+        kind: 'wallet',
+        units: unitCost,
+        remainingFree: 0,
+        remainingCredits: await getWalletCredits(db, walletClientHash),
+        walletClientHash,
+      };
+    }
   }
 
   const creditUpdate = await db.prepare(`
@@ -183,7 +226,9 @@ export async function chargeQuota(
     kind: 'none',
     units: 0,
     remainingFree: 0,
-    remainingCredits: row?.credits ?? 0,
+    remainingCredits: walletClientHash
+      ? await getWalletCredits(db, walletClientHash)
+      : row?.credits ?? 0,
   };
 }
 
@@ -206,6 +251,17 @@ export async function refundQuota(
           updated_at = CURRENT_TIMESTAMP
       WHERE client_id = ? AND daily_date = ?
     `).bind(charge.units, charge.units, clientId, today).run();
+    return;
+  }
+
+  if (charge.kind === 'wallet' && charge.walletClientHash) {
+    await db.prepare(`
+      INSERT INTO billing_wallets (client_hash, credits, updated_at)
+      VALUES (?, ?, CURRENT_TIMESTAMP)
+      ON CONFLICT(client_hash) DO UPDATE SET
+        credits = billing_wallets.credits + excluded.credits,
+        updated_at = CURRENT_TIMESTAMP
+    `).bind(charge.walletClientHash, charge.units).run();
     return;
   }
 
