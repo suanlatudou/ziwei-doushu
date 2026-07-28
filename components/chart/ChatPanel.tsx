@@ -1,0 +1,300 @@
+'use client';
+import { useState, useRef, useEffect, useCallback } from 'react';
+import { motion, AnimatePresence } from 'framer-motion';
+import type { ZiweiChart } from '@/lib/ziwei/types';
+import {
+  buildAfdianPurchaseUrl,
+  getBillingBalance,
+  streamAiInterpret,
+  type AiMessage,
+} from '@/lib/ai/client';
+
+interface ChatPanelProps {
+  chart: ZiweiChart;
+}
+
+const AFDIAN_PACKAGES = [
+  {
+    credits: 1 as const,
+    label: '1 次',
+    price: '¥1.88',
+    itemUrl: 'https://www.ifdian.net/item/6f5e5c788a3511f1af625254001e7c00',
+    checkoutUrl: process.env.NEXT_PUBLIC_AFDIAN_CHECKOUT_1,
+  },
+  {
+    credits: 3 as const,
+    label: '3 次',
+    price: '¥4.88',
+    itemUrl: 'https://www.ifdian.net/item/aa3926f88a3411f1aa295254001e7c00',
+    checkoutUrl: process.env.NEXT_PUBLIC_AFDIAN_CHECKOUT_3,
+  },
+  {
+    credits: 10 as const,
+    label: '10 次',
+    price: '¥12.88',
+    itemUrl: 'https://www.ifdian.net/item/e4a616f28a5711f1a6115254001e7c00',
+    checkoutUrl: process.env.NEXT_PUBLIC_AFDIAN_CHECKOUT_10,
+    recommended: true,
+  },
+] as const;
+
+const PRESET_QUESTIONS = [
+  '我的整体命格如何？性格特点是什么？',
+  '我的感情婚姻运势如何？',
+  '我的事业财运如何？适合什么方向？',
+  '我现在的大限运势如何？',
+  '我的健康需要注意什么？',
+  '今年的流年运势如何？',
+];
+
+export default function ChatPanel({ chart }: ChatPanelProps) {
+  const [messages, setMessages] = useState<AiMessage[]>([]);
+  const [input, setInput] = useState('');
+  const [loading, setLoading] = useState(false);
+  const [paidCredits, setPaidCredits] = useState<number | null>(null);
+  const [billingAvailable, setBillingAvailable] = useState(true);
+  const scrollRef = useRef<HTMLDivElement>(null);
+
+  const refreshBalance = useCallback(async () => {
+    try {
+      const balance = await getBillingBalance();
+      setPaidCredits(balance.paidCredits);
+      setBillingAvailable(true);
+    } catch (error) {
+      console.error('Billing balance refresh failed', error);
+      setBillingAvailable(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void refreshBalance();
+  }, [refreshBalance]);
+
+  useEffect(() => {
+    const refreshWhenVisible = () => {
+      if (document.visibilityState === 'visible') void refreshBalance();
+    };
+    window.addEventListener('focus', refreshWhenVisible);
+    document.addEventListener('visibilitychange', refreshWhenVisible);
+    return () => {
+      window.removeEventListener('focus', refreshWhenVisible);
+      document.removeEventListener('visibilitychange', refreshWhenVisible);
+    };
+  }, [refreshBalance]);
+
+  useEffect(() => {
+    if (scrollRef.current) {
+      scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+    }
+  }, [messages]);
+
+  const replacePendingAssistant = (content: string) => {
+    setMessages(prev => {
+      const updated = [...prev];
+      const lastIndex = updated.length - 1;
+      if (lastIndex >= 0 && updated[lastIndex].role === 'assistant') {
+        updated[lastIndex] = { role: 'assistant', content };
+      } else {
+        updated.push({ role: 'assistant', content });
+      }
+      return updated;
+    });
+  };
+
+  const openPurchase = (pkg: typeof AFDIAN_PACKAGES[number]) => {
+    const purchase = buildAfdianPurchaseUrl({
+      credits: pkg.credits,
+      checkoutUrl: pkg.checkoutUrl,
+      fallbackItemUrl: pkg.itemUrl,
+    });
+
+    if (!purchase.automaticCredit) {
+      console.warn(`Afdian checkout URL for ${pkg.credits} credits is not configured; opening item page fallback.`);
+    }
+    window.open(purchase.url, '_blank', 'noopener,noreferrer');
+  };
+
+  const sendMessage = async (text: string) => {
+    const question = text.trim();
+    if (!question || loading) return;
+
+    const userMessage: AiMessage = { role: 'user', content: question };
+    const conversation = [...messages, userMessage];
+    setMessages([...conversation, { role: 'assistant', content: '' }]);
+    setInput('');
+    setLoading(true);
+
+    try {
+      await streamAiInterpret({
+        chart,
+        mode: 'chart',
+        messages: conversation,
+        onDelta: (_delta, fullText) => replacePendingAssistant(fullText),
+        onMeta: meta => {
+          if (meta.remainingCredits !== undefined) setPaidCredits(meta.remainingCredits);
+        },
+      });
+    } catch (error) {
+      replacePendingAssistant(
+        error instanceof Error && error.message.trim()
+          ? error.message
+          : '解读失败，请稍后重试。',
+      );
+    } finally {
+      setLoading(false);
+      void refreshBalance();
+    }
+  };
+
+  return (
+    <div className="flex flex-col h-full rounded-xl overflow-hidden card-glass">
+      <div className="px-4 py-3 flex-shrink-0" style={{ borderBottom: '1px solid var(--t-border)' }}>
+        <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+          <div>
+            <h3 className="text-xs font-medium tracking-widest" style={{ color: 'var(--t-gold)' }}>AI 命盘解读</h3>
+            <p className="text-[10px] mt-0.5" style={{ color: 'var(--t-faint)' }}>
+              传统文化参考 · AI 辅助解析
+              {billingAvailable && paidCredits !== null ? ` · 付费余额 ${paidCredits} 次` : ''}
+            </p>
+          </div>
+          <div className="flex flex-wrap items-center gap-1.5" aria-label="购买 AI 解读次数">
+            {AFDIAN_PACKAGES.map(pkg => (
+              <button
+                type="button"
+                key={pkg.credits}
+                onClick={() => openPurchase(pkg)}
+                className="relative shrink-0 rounded-lg px-2.5 py-1.5 text-[10px] font-medium transition-all"
+                style={{
+                  color: 'var(--t-gold)',
+                  border: pkg.recommended
+                    ? '1px solid rgba(212,168,67,0.48)'
+                    : '1px solid rgba(212,168,67,0.24)',
+                  background: pkg.recommended
+                    ? 'rgba(212,168,67,0.16)'
+                    : 'rgba(212,168,67,0.07)',
+                }}
+                aria-label={`前往爱发电购买 ${pkg.credits} 次 AI 解读，价格 ${pkg.price}`}
+              >
+                {pkg.label} · {pkg.price}{pkg.recommended ? ' · 推荐' : ''}
+              </button>
+            ))}
+          </div>
+        </div>
+      </div>
+
+      <div ref={scrollRef} className="flex-1 overflow-y-auto p-4 space-y-3 min-h-0">
+        {messages.length === 0 && (
+          <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="text-center py-8">
+            <div className="text-4xl mb-3" style={{ color: 'var(--t-gold)', opacity: 0.15 }}>✦</div>
+            <p className="text-xs leading-relaxed" style={{ color: 'var(--t-faint)' }}>
+              命盘已生成，可直接提问<br />
+              或从下方选择常见问题开始解读
+            </p>
+          </motion.div>
+        )}
+
+        <AnimatePresence>
+          {messages.map((msg, i) => (
+            <motion.div
+              key={i}
+              initial={{ opacity: 0, y: 8 }}
+              animate={{ opacity: 1, y: 0 }}
+              className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}
+            >
+              <div
+                className="max-w-[85%] rounded-xl px-3.5 py-2.5 text-sm leading-relaxed"
+                style={msg.role === 'user' ? {
+                  background: 'rgba(212,168,67,0.1)',
+                  border: '1px solid rgba(212,168,67,0.2)',
+                  color: 'var(--t-gold)',
+                } : {
+                  background: 'var(--t-card)',
+                  border: '1px solid var(--t-border)',
+                  color: 'var(--t-text)',
+                }}
+              >
+                {msg.role === 'assistant' && (
+                  <div className="text-[10px] mb-1" style={{ color: 'var(--t-faint)' }}>AI 解读 ·</div>
+                )}
+                <div className="whitespace-pre-wrap text-xs leading-relaxed">
+                  {msg.content}
+                  {loading && i === messages.length - 1 && msg.role === 'assistant' && (
+                    <span className="inline-block w-1.5 h-3 ml-0.5 animate-pulse" style={{ background: 'var(--t-gold)', opacity: 0.6 }} />
+                  )}
+                </div>
+              </div>
+            </motion.div>
+          ))}
+        </AnimatePresence>
+      </div>
+
+      {messages.length === 0 && (
+        <div className="px-3 pb-2 flex-shrink-0">
+          <div className="grid grid-cols-2 gap-1.5">
+            {PRESET_QUESTIONS.map((question, i) => (
+              <button
+                key={i}
+                type="button"
+                onClick={() => sendMessage(question)}
+                disabled={loading}
+                className="text-left text-[10px] rounded-lg px-2.5 py-2 transition-all line-clamp-2"
+                style={{
+                  color: 'var(--t-text2)',
+                  border: '1px solid var(--t-border)',
+                  background: 'transparent',
+                }}
+                onMouseEnter={event => {
+                  event.currentTarget.style.borderColor = 'rgba(212,168,67,0.3)';
+                  event.currentTarget.style.color = 'var(--t-gold)';
+                }}
+                onMouseLeave={event => {
+                  event.currentTarget.style.borderColor = 'var(--t-border)';
+                  event.currentTarget.style.color = 'var(--t-text2)';
+                }}
+              >
+                {question}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+
+      <div className="px-3 pb-3 pt-2 flex-shrink-0" style={{ borderTop: '1px solid var(--t-border)' }}>
+        <div className="flex gap-2">
+          <input
+            type="text"
+            value={input}
+            onChange={event => setInput(event.target.value)}
+            onKeyDown={event => {
+              if (event.key === 'Enter' && !event.shiftKey) {
+                event.preventDefault();
+                void sendMessage(input);
+              }
+            }}
+            placeholder="输入问题，如：我的感情运势如何？"
+            disabled={loading}
+            className="flex-1 rounded-lg px-3 py-2 text-xs focus:outline-none transition-colors"
+            style={{
+              background: 'var(--t-card)',
+              border: '1px solid var(--t-border)',
+              color: 'var(--t-text)',
+            }}
+          />
+          <button
+            type="button"
+            onClick={() => void sendMessage(input)}
+            disabled={loading || !input.trim()}
+            className="px-3 py-2 rounded-lg text-xs font-medium transition-all disabled:opacity-30 disabled:cursor-not-allowed"
+            style={{
+              background: 'rgba(212,168,67,0.15)',
+              border: '1px solid rgba(212,168,67,0.25)',
+              color: 'var(--t-gold)',
+            }}
+          >
+            解读
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
