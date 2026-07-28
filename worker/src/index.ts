@@ -17,6 +17,7 @@ import {
   handleAfdianWebhook,
   handleBillingSession,
   hashBillingClientId,
+  isBillingConfigured,
   isValidBillingClientId,
 } from './billing';
 
@@ -37,6 +38,15 @@ export interface Env {
   FREE_DAILY_LIMIT?: string;
   COMPATIBILITY_CREDIT_COST?: string;
   AI_CACHE_TTL_SECONDS?: string;
+  AFDIAN_API_TOKEN?: string;
+  AFDIAN_WEBHOOK_TOKEN?: string;
+  AFDIAN_USER_ID?: string;
+  AFDIAN_PACKAGE_1_PLAN_ID?: string;
+  AFDIAN_PACKAGE_1_SKU_ID?: string;
+  AFDIAN_PACKAGE_3_PLAN_ID?: string;
+  AFDIAN_PACKAGE_3_SKU_ID?: string;
+  AFDIAN_PACKAGE_10_PLAN_ID?: string;
+  AFDIAN_PACKAGE_10_SKU_ID?: string;
   RATE_LIMITER?: RateLimitBinding;
   DB?: D1Database;
 }
@@ -71,7 +81,7 @@ const MAX_CHART_CHARS = 180_000;
 const MAX_MESSAGES = 12;
 const MAX_MESSAGE_CHARS = 12_000;
 const DEFAULT_FREE_DAILY_LIMIT = 3;
-const DEFAULT_COMPATIBILITY_COST = 2;
+const DEFAULT_COMPATIBILITY_COST = 1;
 const DEFAULT_CACHE_TTL_SECONDS = 604_800;
 const MAX_CACHE_TTL_SECONDS = 2_592_000;
 
@@ -504,12 +514,12 @@ export default {
         ok: true,
         service: 'ziwei-ai-api',
         database: Boolean(env.DB),
-        billing: Boolean(env.DB),
+        billing: isBillingConfigured(env),
         knowledgeVersion: KNOWLEDGE_VERSION,
       }, 200, headers);
     }
 
-    // 爱发电服务器回调没有浏览器 Origin，不使用浏览器 CORS 限制；安全性由 RSA 验签保证。
+    // 爱发电服务器回调没有浏览器 Origin；私有 token 与 query-order 回查负责验单。
     if (url.pathname === '/api/afdian/webhook') {
       return handleAfdianWebhook(request, env);
     }
@@ -530,6 +540,9 @@ export default {
     }
     if (origin && !isAllowedOrigin(origin, allowedOrigins)) {
       return jsonResponse({ error: '当前来源未获授权' }, 403, headers);
+    }
+    if (!isBillingConfigured(env)) {
+      return jsonResponse({ error: '次数服务尚未完成安全配置，请稍后再试' }, 503, headers);
     }
     if (!env.DEEPSEEK_API_KEY) {
       return jsonResponse({ error: 'AI 服务尚未配置' }, 503, headers);
@@ -572,7 +585,7 @@ export default {
       }
     }
 
-    const db = env.DB;
+    const db = env.DB!;
     const mode = body.mode;
     const model = env.DEEPSEEK_MODEL || 'deepseek-v4-flash';
     const thinkingType: 'enabled' | 'disabled' = env.DEEPSEEK_THINKING === 'enabled'
@@ -585,13 +598,13 @@ export default {
     const cacheKey = await makeCacheKey(body, model, thinkingType);
     const nowSeconds = Math.floor(Date.now() / 1000);
 
-    if (db && Math.random() < 0.01) {
+    if (Math.random() < 0.01) {
       context.waitUntil(purgeExpiredCache(db, nowSeconds).catch(error => {
         console.error('Expired cache purge failed', error);
       }));
     }
 
-    if (db && body.cache) {
+    if (body.cache) {
       try {
         const cached = await getCachedResponse(db, cacheKey, mode, nowSeconds);
         if (cached) {
@@ -618,29 +631,27 @@ export default {
     const walletClientHash = await resolveWalletClientHash(body.clientId);
 
     let charge: ChargeResult = NO_CHARGE;
-    if (db) {
-      try {
-        charge = await chargeQuota(
-          db,
-          subjectKey,
-          mode,
-          freeDailyLimit,
-          compatibilityCost,
-          walletClientHash,
-        );
-      } catch (error) {
-        console.error('Quota charge failed', error);
-        return jsonResponse({ error: '次数服务暂时不可用，请稍后重试' }, 503, headers);
-      }
+    try {
+      charge = await chargeQuota(
+        db,
+        subjectKey,
+        mode,
+        freeDailyLimit,
+        compatibilityCost,
+        walletClientHash,
+      );
+    } catch (error) {
+      console.error('Quota charge failed', error);
+      return jsonResponse({ error: '次数服务暂时不可用，请稍后重试' }, 503, headers);
+    }
 
-      if (!charge.allowed) {
-        return jsonResponse({
-          error: '今日免费次数和付费次数均已用完，请充值次数或开通 VIP',
-          code: 'INSUFFICIENT_QUOTA',
-          remainingFree: charge.remainingFree ?? 0,
-          remainingCredits: charge.remainingCredits ?? 0,
-        }, 402, headers);
-      }
+    if (!charge.allowed) {
+      return jsonResponse({
+        error: '今日免费次数和付费次数均已用完，请充值次数或开通 VIP',
+        code: 'INSUFFICIENT_QUOTA',
+        remainingFree: charge.remainingFree ?? 0,
+        remainingCredits: charge.remainingCredits ?? 0,
+      }, 402, headers);
     }
 
     let systemMessage: ChatMessage;
@@ -654,7 +665,7 @@ export default {
       systemMessage = buildSystemMessage(body, knowledgeContext);
     } catch (error) {
       console.error('Knowledge or chart preparation failed', error);
-      if (db) await refundQuota(db, subjectKey, charge).catch(() => undefined);
+      await refundQuota(db, subjectKey, charge).catch(() => undefined);
       return jsonResponse({ error: '命盘数据过大或无法解析' }, 413, headers);
     }
 
@@ -677,22 +688,15 @@ export default {
       });
     } catch (error) {
       console.error('DeepSeek request failed before response', error);
-      if (db) await refundQuota(db, subjectKey, charge).catch(() => undefined);
+      await refundQuota(db, subjectKey, charge).catch(() => undefined);
       return jsonResponse({ error: 'AI 服务暂时不可用，请稍后重试' }, 502, headers);
     }
 
     if (!upstream.ok || !upstream.body) {
       const detail = await upstream.text().catch(() => '');
       console.error('DeepSeek request failed', upstream.status, detail.slice(0, 1000));
-      if (db) await refundQuota(db, subjectKey, charge).catch(() => undefined);
+      await refundQuota(db, subjectKey, charge).catch(() => undefined);
       return jsonResponse({ error: 'AI 服务暂时不可用，请稍后重试' }, 502, headers);
-    }
-
-    if (!db) {
-      return new Response(transformDeepSeekStream(upstream.body), {
-        status: 200,
-        headers: sseHeaders(headers, 'BYPASS', charge),
-      });
     }
 
     const [clientStream, auditStream] = upstream.body.tee();
