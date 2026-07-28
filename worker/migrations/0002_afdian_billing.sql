@@ -1,14 +1,5 @@
 -- 爱发电自动充值：稳定浏览器钱包 + 订单幂等记录。
--- 每个浏览器使用高熵 clientId；Webhook 将 custom_order_id 对应的额度写入稳定钱包。
-
-CREATE TABLE IF NOT EXISTS billing_clients (
-  client_hash TEXT PRIMARY KEY,
-  subject_key TEXT NOT NULL,
-  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-);
-
-CREATE INDEX IF NOT EXISTS idx_billing_clients_subject
-  ON billing_clients(subject_key);
+-- 免费次数仍由 ai_clients 按网络主体防刷；付费次数始终保存在 billing_wallets，避免换网络后丢失。
 
 CREATE TABLE IF NOT EXISTS billing_wallets (
   client_hash TEXT PRIMARY KEY,
@@ -33,8 +24,8 @@ CREATE TABLE IF NOT EXISTS afdian_orders (
 CREATE INDEX IF NOT EXISTS idx_afdian_orders_client
   ON afdian_orders(client_hash, received_at);
 
--- 只有真正插入一张“新订单”时触发充值。
--- out_trade_no 为主键，因此爱发电重复推送同一订单不会重复加额度。
+-- 只有真正插入一张新订单时充值。
+-- out_trade_no 是主键，因此爱发电重复推送同一订单不会重复加额度。
 CREATE TRIGGER IF NOT EXISTS trg_afdian_order_credit
 AFTER INSERT ON afdian_orders
 BEGIN
