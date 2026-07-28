@@ -28,7 +28,7 @@ export interface BillingBalance {
 }
 
 export interface PurchaseUrlResult {
-  url: string;
+  url?: string;
   automaticCredit: boolean;
 }
 
@@ -121,27 +121,51 @@ export async function getBillingBalance(signal?: AbortSignal): Promise<BillingBa
 export function buildAfdianPurchaseUrl(options: {
   credits: 1 | 3 | 10;
   checkoutUrl?: string;
-  fallbackItemUrl: string;
 }): PurchaseUrlResult {
   const clientId = getOrCreateAiClientId();
   const checkoutUrl = options.checkoutUrl?.trim();
 
-  if (checkoutUrl) {
-    try {
-      const url = new URL(checkoutUrl);
-      if (url.pathname.includes('/order/create')) {
-        url.searchParams.set('custom_order_id', `ziwei:${clientId}:${options.credits}`);
-        return { url: url.toString(), automaticCredit: true };
-      }
-    } catch {
-      // 配置无效时回退到公开商品页，避免生成不可用付款链接。
-    }
+  if (!checkoutUrl || !isAfdianCheckoutUrl(checkoutUrl)) {
+    return { automaticCredit: false };
   }
 
-  return {
-    url: options.fallbackItemUrl,
-    automaticCredit: false,
-  };
+  const url = new URL(checkoutUrl);
+  url.searchParams.set('custom_order_id', `ziwei:${clientId}:${options.credits}`);
+  return { url: url.toString(), automaticCredit: true };
+}
+
+export function isAfdianCheckoutUrl(rawValue: string | undefined): boolean {
+  const value = rawValue?.trim();
+  if (!value) return false;
+
+  try {
+    const url = new URL(value);
+    const hostname = url.hostname.toLowerCase();
+    const validHost = hostname === 'afdian.com'
+      || hostname.endsWith('.afdian.com')
+      || hostname === 'afdian.net'
+      || hostname.endsWith('.afdian.net')
+      || hostname === 'ifdian.net'
+      || hostname.endsWith('.ifdian.net');
+    if (!validHost || url.protocol !== 'https:' || url.pathname !== '/order/create') return false;
+
+    const idPattern = /^[a-f0-9]{32}$/i;
+    if (!idPattern.test(url.searchParams.get('plan_id') ?? '')) return false;
+
+    const directSkuId = url.searchParams.get('sku_id');
+    if (directSkuId && idPattern.test(directSkuId)) return true;
+
+    const rawSku = url.searchParams.get('sku');
+    if (!rawSku) return false;
+    const sku = JSON.parse(rawSku) as unknown;
+    return Array.isArray(sku)
+      && sku.some(entry => {
+        if (!entry || typeof entry !== 'object') return false;
+        return idPattern.test(String((entry as { sku_id?: unknown }).sku_id ?? ''));
+      });
+  } catch {
+    return false;
+  }
 }
 
 async function readErrorDetails(response: Response): Promise<{
