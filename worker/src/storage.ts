@@ -1,5 +1,5 @@
 export type AiMode = 'chart' | 'compatibility';
-export type ChargedKind = 'none' | 'free' | 'credit' | 'wallet' | 'vip';
+export type ChargedKind = 'none' | 'free' | 'credit' | 'vip';
 
 export interface D1RunResult {
   success?: boolean;
@@ -148,6 +148,7 @@ export async function chargeQuota(
   const unitCost = mode === 'compatibility'
     ? Math.max(1, compatibilityCreditCost)
     : 1;
+
   const freeUpdate = await db.prepare(`
     UPDATE ai_clients
     SET
@@ -196,7 +197,7 @@ export async function chargeQuota(
     if (changes(walletUpdate) > 0) {
       return {
         allowed: true,
-        kind: 'wallet',
+        kind: 'credit',
         units: unitCost,
         remainingFree: 0,
         remainingCredits: await getWalletCredits(db, walletClientHash),
@@ -205,13 +206,13 @@ export async function chargeQuota(
     }
   }
 
-  const creditUpdate = await db.prepare(`
+  const legacyCreditUpdate = await db.prepare(`
     UPDATE ai_clients
     SET credits = credits - ?, updated_at = CURRENT_TIMESTAMP
     WHERE client_id = ? AND credits >= ?
   `).bind(unitCost, clientId, unitCost).run();
 
-  if (changes(creditUpdate) > 0) {
+  if (changes(legacyCreditUpdate) > 0) {
     return {
       allowed: true,
       kind: 'credit',
@@ -254,7 +255,7 @@ export async function refundQuota(
     return;
   }
 
-  if (charge.kind === 'wallet' && charge.walletClientHash) {
+  if (charge.kind === 'credit' && charge.walletClientHash) {
     await db.prepare(`
       INSERT INTO billing_wallets (client_hash, credits, updated_at)
       VALUES (?, ?, CURRENT_TIMESTAMP)
