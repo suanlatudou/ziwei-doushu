@@ -23,7 +23,17 @@ export interface AiResponseMeta {
   remainingCredits?: number;
 }
 
+export interface BillingBalance {
+  paidCredits: number;
+}
+
+export interface PurchaseUrlResult {
+  url: string;
+  automaticCredit: boolean;
+}
+
 const SAME_ORIGIN_AI_API_URL = '/api/interpret';
+const BILLING_SESSION_URL = '/api/billing/session';
 const CLIENT_ID_KEY = 'ziwei-ai-client-id';
 
 function normalizeAiApiUrl(rawValue: string | undefined): string {
@@ -80,6 +90,58 @@ export function getOrCreateAiClientId(): string {
 
   window.localStorage.setItem(CLIENT_ID_KEY, generated);
   return generated;
+}
+
+export async function getBillingBalance(signal?: AbortSignal): Promise<BillingBalance> {
+  const clientId = getOrCreateAiClientId();
+  const response = await fetch(BILLING_SESSION_URL, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'X-Ziwei-Client': clientId,
+    },
+    body: JSON.stringify({ clientId }),
+    signal,
+    cache: 'no-store',
+  });
+
+  if (!response.ok) {
+    const details = await readErrorDetails(response);
+    throw new AiApiError(details.message, response.status, details);
+  }
+
+  const payload = await response.json() as { paidCredits?: unknown };
+  return {
+    paidCredits: typeof payload.paidCredits === 'number'
+      ? Math.max(0, payload.paidCredits)
+      : 0,
+  };
+}
+
+export function buildAfdianPurchaseUrl(options: {
+  credits: 1 | 3 | 10;
+  checkoutUrl?: string;
+  fallbackItemUrl: string;
+}): PurchaseUrlResult {
+  const clientId = getOrCreateAiClientId();
+  const checkoutUrl = options.checkoutUrl?.trim();
+
+  if (checkoutUrl) {
+    try {
+      const url = new URL(checkoutUrl);
+      if (url.pathname.includes('/order/create')) {
+        url.searchParams.set('custom_order_id', `ziwei:${clientId}:${options.credits}`);
+        return { url: url.toString(), automaticCredit: true };
+      }
+    } catch {
+      // 配置无效时回退到公开商品页，避免生成不可用付款链接。
+    }
+  }
+
+  return {
+    url: options.fallbackItemUrl,
+    automaticCredit: false,
+  };
 }
 
 async function readErrorDetails(response: Response): Promise<{
