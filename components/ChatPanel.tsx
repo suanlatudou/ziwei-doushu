@@ -8,7 +8,24 @@ interface ChatPanelProps {
   chart: ZiweiChart;
 }
 
-const AFDIAN_ITEM_URL = 'https://www.ifdian.net/item/e4a616f28a5711f1a6115254001e7c00';
+const AFDIAN_PACKAGES = [
+  {
+    credits: 1,
+    label: '1 次',
+    url: 'https://www.ifdian.net/item/6f5e5c788a3511f1af625254001e7c00',
+  },
+  {
+    credits: 3,
+    label: '3 次',
+    url: 'https://www.ifdian.net/item/aa3926f88a3411f1aa295254001e7c00',
+  },
+  {
+    credits: 10,
+    label: '10 次',
+    url: 'https://www.ifdian.net/item/e4a616f28a5711f1a6115254001e7c00',
+    recommended: true,
+  },
+] as const;
 
 const PRESET_QUESTIONS = [
   '我的整体命格如何？性格特点是什么？',
@@ -75,25 +92,34 @@ export default function ChatPanel({ chart }: ChatPanelProps) {
   return (
     <div className="flex flex-col h-full rounded-xl overflow-hidden card-glass">
       <div className="px-4 py-3 flex-shrink-0" style={{ borderBottom: '1px solid var(--t-border)' }}>
-        <div className="flex items-center justify-between gap-3">
+        <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
           <div>
             <h3 className="text-xs font-medium tracking-widest" style={{ color: 'var(--t-gold)' }}>AI 命盘解读</h3>
             <p className="text-[10px] mt-0.5" style={{ color: 'var(--t-faint)' }}>传统文化参考 · AI 辅助解析</p>
           </div>
-          <a
-            href={AFDIAN_ITEM_URL}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="shrink-0 rounded-lg px-3 py-1.5 text-[10px] font-medium transition-all"
-            style={{
-              color: 'var(--t-gold)',
-              border: '1px solid rgba(212,168,67,0.28)',
-              background: 'rgba(212,168,67,0.10)',
-            }}
-            aria-label="前往爱发电购买 10 次 AI 解读"
-          >
-            购买 10 次
-          </a>
+          <div className="flex items-center gap-1.5" aria-label="购买 AI 解读次数">
+            {AFDIAN_PACKAGES.map(pkg => (
+              <a
+                key={pkg.credits}
+                href={pkg.url}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="relative shrink-0 rounded-lg px-2.5 py-1.5 text-[10px] font-medium transition-all"
+                style={{
+                  color: 'var(--t-gold)',
+                  border: pkg.recommended
+                    ? '1px solid rgba(212,168,67,0.48)'
+                    : '1px solid rgba(212,168,67,0.24)',
+                  background: pkg.recommended
+                    ? 'rgba(212,168,67,0.16)'
+                    : 'rgba(212,168,67,0.07)',
+                }}
+                aria-label={`前往爱发电购买 ${pkg.credits} 次 AI 解读`}
+              >
+                {pkg.label}{pkg.recommended ? ' · 推荐' : ''}
+              </a>
+            ))}
+          </div>
         </div>
       </div>
 
