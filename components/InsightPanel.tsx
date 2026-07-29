@@ -561,11 +561,15 @@ ${selectedSiHua.starName}化${selectedSiHua.siHua}落在【${palaceName}】，�
           <button
             onClick={handleSend}
             disabled={loading || !input.trim()}
-            className="px-3 py-2 rounded-lg text-[11px] font-medium transition-all disabled:opacity-30 disabled:cursor-not-allowed"
+            className="min-w-[64px] px-4 py-2 rounded-lg text-[12px] font-bold shadow-sm transition-all hover:brightness-105 active:scale-[0.98] disabled:cursor-not-allowed disabled:shadow-none"
             style={{
-              background: 'rgba(212,168,67,0.15)',
-              border: '1px solid rgba(212,168,67,0.25)',
-              color: 'var(--t-gold)',
+              background: loading || !input.trim()
+                ? 'rgba(184,146,42,0.18)'
+                : 'var(--t-gold)',
+              border: '1px solid rgba(184,146,42,0.72)',
+              color: loading || !input.trim()
+                ? 'var(--t-gold)'
+                : '#211706',
             }}
           >
             {loading ? '…' : '追问'}
