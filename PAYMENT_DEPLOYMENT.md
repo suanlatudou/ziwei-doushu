@@ -63,3 +63,15 @@ npx --prefix worker wrangler deploy --dry-run
 - 页面能显示付费余额，三个购买按钮均为“自动到账”
 
 以上全部通过后，再做 ¥1.88 实单测试。
+
+## 5. Cloudflare Workers Builds
+
+独立 Worker `ziwei-ai-api` 连接 GitHub 仓库后使用以下配置：
+
+- Production branch：`main`
+- Build command：`npm run typecheck`
+- Deploy command：`npx wrangler deploy`
+- Non-production branch deploy command：`npx wrangler versions upload`
+- Root directory：`/worker`
+
+非生产分支只上传 Worker 版本，不自动切换生产流量。
