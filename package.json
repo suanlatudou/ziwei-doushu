@@ -7,13 +7,13 @@
     "build": "next build",
     "start": "next start",
     "typecheck": "tsc --noEmit",
-    "check": "npm run typecheck && npm run build",
-    "build:cf": "npx @cloudflare/next-on-pages",
+    "check": "npm run typecheck && npm run build && npm --prefix worker run typecheck",
     "preview:cf": "npx wrangler pages dev",
     "prepare": "husky"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.27.0",
+    "@noble/hashes": "^1.8.0",
     "@types/pg": "^8.20.0",
     "@vercel/analytics": "^2.0.1",
     "@vercel/speed-insights": "^2.0.0",
@@ -30,7 +30,6 @@
     "vercel": "^50.42.0"
   },
   "devDependencies": {
-    "@cloudflare/next-on-pages": "^1.13.16",
     "@types/node": "^20",
     "@types/react": "^19",
     "@types/react-dom": "^19",

@@ -1,11 +1,25 @@
+import { md5 } from '@noble/hashes/legacy.js';
+import { bytesToHex } from '@noble/hashes/utils.js';
 import { getWalletCredits, type D1Database } from './storage';
 
 export interface BillingEnv {
   DB?: D1Database;
+  AFDIAN_API_TOKEN?: string;
+  AFDIAN_WEBHOOK_TOKEN?: string;
+  AFDIAN_USER_ID?: string;
+  AFDIAN_PACKAGE_1_PLAN_ID?: string;
+  AFDIAN_PACKAGE_1_SKU_ID?: string;
+  AFDIAN_PACKAGE_3_PLAN_ID?: string;
+  AFDIAN_PACKAGE_3_SKU_ID?: string;
+  AFDIAN_PACKAGE_10_PLAN_ID?: string;
+  AFDIAN_PACKAGE_10_SKU_ID?: string;
 }
 
 const CLIENT_ID_RE = /^[a-zA-Z0-9._:-]{8,128}$/;
+const AFDIAN_ID_RE = /^[a-f0-9]{32}$/i;
 const CUSTOM_ORDER_PREFIX = 'ziwei:';
+const AFDIAN_QUERY_ORDER_URL = 'https://afdian.com/api/open/query-order';
+const MAX_QUERY_PAGES = 3;
 
 const PACKAGE_AMOUNTS: Record<number, string> = {
   1: '1.88',
@@ -13,18 +27,13 @@ const PACKAGE_AMOUNTS: Record<number, string> = {
   10: '12.88',
 };
 
-const AFDIAN_PUBLIC_KEY_PEM = `-----BEGIN PUBLIC KEY-----
-MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAwwdaCg1Bt+UKZKs0R54y
-lYnuANma49IpgoOwNmk3a0rhg/PQuhUJ0EOZSowIC44l0K3+fqGns3Ygi4AfmEfS
-4EKbdk1ahSxu7Zkp2rHMt+R9GarQFQkwSS/5x1dYiHNVMiR8oIXDgjmvxuNes2Cr
-8fw9dEF0xNBKdkKgG2qAawcN1nZrdyaKWtPVT9m2Hl0ddOO9thZmVLFOb9NVzgYf
-jEgI+KWX6aY19Ka/ghv/L4t1IXmz9pctablN5S0CRWpJW3Cn0k6zSXgjVdKm4uN7
-jRlgSRaf/Ind46vMCm3N2sgwxu/g3bnooW+db0iLo13zzuvyn727Q3UDQ0MmZcEW
-MQIDAQAB
------END PUBLIC KEY-----`;
-
 interface BillingSessionBody {
   clientId: string;
+}
+
+interface AfdianSku {
+  sku_id?: string;
+  count?: number;
 }
 
 interface AfdianOrder {
@@ -32,18 +41,33 @@ interface AfdianOrder {
   custom_order_id?: string;
   user_id?: string;
   plan_id?: string;
+  sku_detail?: AfdianSku[] | string;
   total_amount?: string;
-  status?: number;
-  product_type?: number;
+  status?: number | string;
+  product_type?: number | string;
 }
 
 interface AfdianWebhookBody {
-  sign?: string;
   data?: {
     type?: string;
-    sign?: string;
     order?: AfdianOrder;
   };
+}
+
+interface AfdianQueryOrderResponse {
+  ec?: number;
+  em?: string;
+  data?: {
+    list?: AfdianOrder[];
+    total_page?: number;
+  };
+}
+
+interface PackageIdentity {
+  credits: 1 | 3 | 10;
+  amount: string;
+  planId: string;
+  skuId: string;
 }
 
 function json(data: unknown, status = 200): Response {
@@ -71,50 +95,52 @@ export async function hashBillingClientId(clientId: string): Promise<string> {
   return sha256Hex(clientId);
 }
 
-function base64ToBytes(value: string): Uint8Array {
-  const binary = atob(value);
-  const bytes = new Uint8Array(binary.length);
-  for (let index = 0; index < binary.length; index += 1) {
-    bytes[index] = binary.charCodeAt(index);
+function packageIdentity(env: BillingEnv, credits: number): PackageIdentity | null {
+  if (credits === 1) {
+    return {
+      credits,
+      amount: PACKAGE_AMOUNTS[credits],
+      planId: env.AFDIAN_PACKAGE_1_PLAN_ID?.trim() ?? '',
+      skuId: env.AFDIAN_PACKAGE_1_SKU_ID?.trim() ?? '',
+    };
   }
-  return bytes;
+  if (credits === 3) {
+    return {
+      credits,
+      amount: PACKAGE_AMOUNTS[credits],
+      planId: env.AFDIAN_PACKAGE_3_PLAN_ID?.trim() ?? '',
+      skuId: env.AFDIAN_PACKAGE_3_SKU_ID?.trim() ?? '',
+    };
+  }
+  if (credits === 10) {
+    return {
+      credits,
+      amount: PACKAGE_AMOUNTS[credits],
+      planId: env.AFDIAN_PACKAGE_10_PLAN_ID?.trim() ?? '',
+      skuId: env.AFDIAN_PACKAGE_10_SKU_ID?.trim() ?? '',
+    };
+  }
+  return null;
 }
 
-async function importAfdianPublicKey(): Promise<CryptoKey> {
-  const der = AFDIAN_PUBLIC_KEY_PEM
-    .replace('-----BEGIN PUBLIC KEY-----', '')
-    .replace('-----END PUBLIC KEY-----', '')
-    .replace(/\s+/g, '');
-  const bytes = base64ToBytes(der);
-  return crypto.subtle.importKey(
-    'spki',
-    bytes.buffer,
-    { name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-256' },
-    false,
-    ['verify'],
+function isValidPackageIdentity(pkg: PackageIdentity | null): pkg is PackageIdentity {
+  return Boolean(
+    pkg
+    && AFDIAN_ID_RE.test(pkg.planId)
+    && AFDIAN_ID_RE.test(pkg.skuId),
   );
 }
 
-async function verifyAfdianSignature(order: AfdianOrder, signature: string): Promise<boolean> {
-  const outTradeNo = order.out_trade_no ?? '';
-  const userId = order.user_id ?? '';
-  const planId = order.plan_id ?? '';
-  const totalAmount = order.total_amount ?? '';
-  if (!outTradeNo || !userId || !totalAmount || !signature) return false;
-
-  try {
-    const key = await importAfdianPublicKey();
-    const signString = `${outTradeNo}${userId}${planId}${totalAmount}`;
-    return crypto.subtle.verify(
-      { name: 'RSASSA-PKCS1-v1_5' },
-      key,
-      base64ToBytes(signature),
-      new TextEncoder().encode(signString),
-    );
-  } catch (error) {
-    console.error('Afdian signature verification failed', error);
-    return false;
-  }
+export function isBillingConfigured(env: BillingEnv): boolean {
+  return Boolean(
+    env.DB
+    && env.AFDIAN_API_TOKEN?.trim()
+    && (env.AFDIAN_WEBHOOK_TOKEN?.trim().length ?? 0) >= 32
+    && env.AFDIAN_USER_ID?.trim()
+    && isValidPackageIdentity(packageIdentity(env, 1))
+    && isValidPackageIdentity(packageIdentity(env, 3))
+    && isValidPackageIdentity(packageIdentity(env, 10)),
+  );
 }
 
 function parseCustomOrderId(value: string): { clientId: string; credits: number } | null {
@@ -129,9 +155,25 @@ function parseCustomOrderId(value: string): { clientId: string; credits: number 
   return { clientId, credits };
 }
 
-function amountMatchesPackage(amount: string | undefined, credits: number): boolean {
+function amountMatchesPackage(amount: string | undefined, expectedAmount: string): boolean {
   const parsed = Number(amount ?? '');
-  return Number.isFinite(parsed) && parsed.toFixed(2) === PACKAGE_AMOUNTS[credits];
+  return Number.isFinite(parsed) && parsed.toFixed(2) === expectedAmount;
+}
+
+function skuIds(order: AfdianOrder): string[] {
+  let details = order.sku_detail;
+  if (typeof details === 'string') {
+    try {
+      details = JSON.parse(details) as AfdianSku[];
+    } catch {
+      return [];
+    }
+  }
+  if (!Array.isArray(details)) return [];
+  return details
+    .filter(item => Number(item?.count ?? 1) > 0)
+    .map(item => item?.sku_id?.trim() ?? '')
+    .filter(Boolean);
 }
 
 async function parseJsonBody<T>(request: Request, maxChars = 32_000): Promise<T | null> {
@@ -142,6 +184,63 @@ async function parseJsonBody<T>(request: Request, maxChars = 32_000): Promise<T 
   } catch {
     return null;
   }
+}
+
+function tokenMatches(actual: string | null, expected: string): boolean {
+  const actualBytes = new TextEncoder().encode(actual ?? '');
+  const expectedBytes = new TextEncoder().encode(expected);
+  const length = Math.max(actualBytes.length, expectedBytes.length);
+  let mismatch = actualBytes.length ^ expectedBytes.length;
+  for (let index = 0; index < length; index += 1) {
+    mismatch |= (actualBytes[index] ?? 0) ^ (expectedBytes[index] ?? 0);
+  }
+  return mismatch === 0;
+}
+
+function signAfdianRequest(token: string, userId: string, params: string, timestamp: number): string {
+  const payload = `${token}params${params}ts${timestamp}user_id${userId}`;
+  return bytesToHex(md5(new TextEncoder().encode(payload)));
+}
+
+async function fetchAfdianOrderPage(
+  env: BillingEnv,
+  page: number,
+): Promise<AfdianQueryOrderResponse> {
+  const token = env.AFDIAN_API_TOKEN?.trim();
+  const userId = env.AFDIAN_USER_ID?.trim();
+  if (!token || !userId) throw new Error('AFDIAN_API_NOT_CONFIGURED');
+
+  const params = JSON.stringify({ page });
+  const timestamp = Math.floor(Date.now() / 1000);
+  const response = await fetch(AFDIAN_QUERY_ORDER_URL, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      user_id: userId,
+      params,
+      ts: timestamp,
+      sign: signAfdianRequest(token, userId, params, timestamp),
+    }),
+  });
+  if (!response.ok) throw new Error(`AFDIAN_QUERY_HTTP_${response.status}`);
+
+  const payload = await response.json() as AfdianQueryOrderResponse;
+  if (payload.ec !== 200 || !Array.isArray(payload.data?.list)) {
+    throw new Error(`AFDIAN_QUERY_REJECTED_${payload.ec ?? 'UNKNOWN'}`);
+  }
+  return payload;
+}
+
+async function queryAfdianOrder(env: BillingEnv, outTradeNo: string): Promise<AfdianOrder | null> {
+  for (let page = 1; page <= MAX_QUERY_PAGES; page += 1) {
+    const payload = await fetchAfdianOrderPage(env, page);
+    const order = payload.data?.list?.find(item => item.out_trade_no === outTradeNo);
+    if (order) return order;
+
+    const totalPages = Number(payload.data?.total_page ?? 1);
+    if (!Number.isFinite(totalPages) || page >= totalPages) break;
+  }
+  return null;
 }
 
 export async function handleBillingSession(request: Request, env: BillingEnv): Promise<Response> {
@@ -172,43 +271,54 @@ export async function handleBillingSession(request: Request, env: BillingEnv): P
 
 export async function handleAfdianWebhook(request: Request, env: BillingEnv): Promise<Response> {
   if (request.method !== 'POST') return json({ ec: 405, em: 'method not allowed' }, 405);
-  if (!env.DB) return json({ ec: 503, em: 'database unavailable' }, 503);
+  if (!isBillingConfigured(env)) return json({ ec: 503, em: 'billing unavailable' }, 503);
+
+  const webhookToken = env.AFDIAN_WEBHOOK_TOKEN?.trim() ?? '';
+  const suppliedToken = new URL(request.url).searchParams.get('token');
+  if (!webhookToken || !tokenMatches(suppliedToken, webhookToken)) {
+    return json({ ec: 401, em: 'unauthorized' }, 401);
+  }
 
   const body = await parseJsonBody<AfdianWebhookBody>(request);
-  const order = body?.data?.order;
-  if (!body || body.data?.type !== 'order' || !order) {
+  const webhookOrder = body?.data?.order;
+  if (!body || body.data?.type !== 'order' || !webhookOrder?.out_trade_no) {
     return json({ ec: 400, em: 'invalid payload' }, 400);
   }
+  if (Number(webhookOrder.status) !== 2) return json({ ec: 200, em: '' });
 
-  const signature = body.sign ?? body.data?.sign ?? '';
-  if (!(await verifyAfdianSignature(order, signature))) {
-    return json({ ec: 401, em: 'invalid signature' }, 401);
+  let order: AfdianOrder | null;
+  try {
+    order = await queryAfdianOrder(env, webhookOrder.out_trade_no);
+  } catch (error) {
+    console.error('Afdian query-order failed', error);
+    return json({ ec: 503, em: 'order verification unavailable' }, 503);
   }
-
-  if (order.status !== 2) {
-    return json({ ec: 200, em: '' });
-  }
+  if (!order) return json({ ec: 503, em: 'order not found' }, 503);
 
   const customOrder = parseCustomOrderId(order.custom_order_id ?? '');
-  if (!customOrder) {
-    return json({ ec: 200, em: '' });
+  const expectedPackage = customOrder
+    ? packageIdentity(env, customOrder.credits)
+    : null;
+  if (!customOrder || !isValidPackageIdentity(expectedPackage)) {
+    return json({ ec: 422, em: 'invalid custom order' }, 422);
   }
 
-  if (!amountMatchesPackage(order.total_amount, customOrder.credits)) {
-    return json({ ec: 422, em: 'package amount mismatch' }, 422);
-  }
+  const validOrder = Number(order.status) === 2
+    && Number(order.product_type) === 1
+    && order.plan_id === expectedPackage.planId
+    && skuIds(order).includes(expectedPackage.skuId)
+    && amountMatchesPackage(order.total_amount, expectedPackage.amount);
+  if (!validOrder) return json({ ec: 422, em: 'package identity mismatch' }, 422);
 
   const outTradeNo = order.out_trade_no ?? '';
-  const userId = order.user_id ?? '';
-  const planId = order.plan_id ?? '';
-  const totalAmount = order.total_amount ?? '';
-  if (!outTradeNo || !userId) {
+  const purchaserId = order.user_id ?? '';
+  if (!outTradeNo || !purchaserId) {
     return json({ ec: 422, em: 'unsupported order' }, 422);
   }
 
   const clientHash = await hashBillingClientId(customOrder.clientId);
   try {
-    await env.DB.prepare(`
+    await env.DB!.prepare(`
       INSERT OR IGNORE INTO afdian_orders (
         out_trade_no,
         client_hash,
@@ -217,20 +327,23 @@ export async function handleAfdianWebhook(request: Request, env: BillingEnv): Pr
         total_amount,
         afdian_user_id,
         plan_id,
+        sku_id,
         product_type,
         status,
-        signature_verified
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+        signature_verified,
+        query_verified
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 1)
     `).bind(
       outTradeNo,
       clientHash,
       order.custom_order_id ?? '',
-      customOrder.credits,
-      totalAmount,
-      userId,
-      planId,
-      typeof order.product_type === 'number' ? order.product_type : null,
-      order.status,
+      expectedPackage.credits,
+      order.total_amount ?? '',
+      purchaserId,
+      expectedPackage.planId,
+      expectedPackage.skuId,
+      Number(order.product_type),
+      Number(order.status),
     ).run();
   } catch (error) {
     console.error('Afdian order persistence failed', error);

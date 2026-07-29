@@ -4,17 +4,40 @@
   "main": "src/index.ts",
   "compatibility_date": "2026-07-26",
   "workers_dev": true,
+  "preview_urls": true,
+  "keep_vars": true,
   "observability": {
     "enabled": true
   },
   "vars": {
     "DEEPSEEK_MODEL": "deepseek-v4-flash",
     "DEEPSEEK_THINKING": "disabled",
-    "ALLOWED_ORIGINS": "https://metisziwei.com,https://www.metisziwei.com,https://ziwei-doushu-5xd.pages.dev",
+    "ALLOWED_ORIGINS": "https://metisziwei.com,https://www.metisziwei.com,https://ziwei-doushu-5xd.pages.dev,https://agent-fix-payment-launch.ziwei-doushu-5xd.pages.dev",
     "FREE_DAILY_LIMIT": "3",
-    "COMPATIBILITY_CREDIT_COST": "2",
-    "AI_CACHE_TTL_SECONDS": "604800"
+    "COMPATIBILITY_CREDIT_COST": "1",
+    "AI_CACHE_TTL_SECONDS": "604800",
+    "AFDIAN_USER_ID": "007427e2883311f1809d52540025c377",
+    "AFDIAN_PACKAGE_1_PLAN_ID": "aa3926f88a3411f1aa295254001e7c00",
+    "AFDIAN_PACKAGE_1_SKU_ID": "aa427bc28a3411f1ab565254001e7c00",
+    "AFDIAN_PACKAGE_3_PLAN_ID": "6f5e5c788a3511f1af625254001e7c00",
+    "AFDIAN_PACKAGE_3_SKU_ID": "6f67d5288a3511f1b80f5254001e7c00",
+    "AFDIAN_PACKAGE_10_PLAN_ID": "e4a616f28a5711f1a6115254001e7c00",
+    "AFDIAN_PACKAGE_10_SKU_ID": "e4af0f788a5711f1b6a15254001e7c00"
   },
+  "secrets": {
+    "required": [
+      "DEEPSEEK_API_KEY",
+      "AFDIAN_API_TOKEN",
+      "AFDIAN_WEBHOOK_TOKEN"
+    ]
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "ziwei-ai-db",
+      "database_id": "d758dd61-d502-4312-85cf-8194f17f81c1"
+    }
+  ],
   "ratelimits": [
     {
       "name": "RATE_LIMITER",
