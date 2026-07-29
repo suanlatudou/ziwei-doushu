@@ -44,12 +44,6 @@ function removeExpiredCampaignCards() {
   });
 }
 
-function correctAiProviderCopy() {
-  findExactLeafElements(document, /^倪海夏体系知识库\s*×\s*Claude AI$/).forEach(element => {
-    element.textContent = '倪海夏体系知识库 × DeepSeek AI';
-  });
-}
-
 function openDetailedStar(starName: string) {
   const detailButton = Array.from(document.querySelectorAll<HTMLButtonElement>('button')).find(button => {
     const label = (button.textContent ?? '').trim();
@@ -154,16 +148,14 @@ function clarifyPalaceChartPreview() {
  * 首页继续保留这个组件入口，用于维护容易过期和需要串联的展示内容：
  * 1. 将写死的月份替换为长期有效的开放状态；
  * 2. 移除旧“5/1—5/8 全免费”活动卡片；
- * 3. 将首页 AI 服务商文案同步为当前实际使用的 DeepSeek；
- * 4. 将首屏十四主星入口连接到下方详细解释区；
- * 5. 将空白排盘装饰改成可理解的十二宫地支方位示意。
+ * 3. 将首屏十四主星入口连接到下方详细解释区；
+ * 4. 将空白排盘装饰改成可理解的十二宫地支方位示意。
  */
 export default function AnnouncementModal() {
   useLayoutEffect(() => {
     const applyMaintenance = () => {
       updateRoadmapStatuses();
       removeExpiredCampaignCards();
-      correctAiProviderCopy();
       connectHeroStarsToDetails();
       clarifyPalaceChartPreview();
     };
