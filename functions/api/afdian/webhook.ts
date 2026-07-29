@@ -13,8 +13,6 @@ interface AfdianWebhookPayload {
       out_trade_no?: string;
       user_id?: string;
       plan_id?: string;
-      total_amount?: string;
-      product_type?: number | string;
     };
   };
 }
@@ -46,12 +44,12 @@ async function isAuthenticatedAfdianTest(request: Request, env: Env): Promise<bo
   try {
     const body = await request.clone().json() as AfdianWebhookPayload;
     const order = body.data?.order;
+    // 爱发电测试回调的附加字段可能调整；固定订单、用户和套餐三元组才是稳定标识。
+    // 私密 token 仍必须匹配，并且该分支只返回确认，不写 D1、不增加次数。
     return body.data?.type === 'order'
       && order?.out_trade_no === AFDIAN_TEST_ORDER.outTradeNo
       && order.user_id === AFDIAN_TEST_ORDER.userId
-      && order.plan_id === AFDIAN_TEST_ORDER.planId
-      && Number(order.product_type) === 0
-      && Number(order.total_amount) === 5;
+      && order.plan_id === AFDIAN_TEST_ORDER.planId;
   } catch {
     return false;
   }
