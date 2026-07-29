@@ -117,7 +117,7 @@ export async function chargeQuota(
   db: D1Database,
   clientId: string,
   mode: AiMode,
-  freeDailyLimit: number,
+  freeTotalLimit: number,
   compatibilityCreditCost: number,
   walletClientHash?: string,
   now = new Date(),
@@ -137,50 +137,40 @@ export async function chargeQuota(
       allowed: true,
       kind: 'vip',
       units: 0,
-      remainingFree: Math.max(0, freeDailyLimit - (row.daily_date === dayKey(now) ? row.daily_used : 0)),
+      remainingFree: Math.max(0, freeTotalLimit - Math.max(0, Number(row.daily_used ?? 0))),
       remainingCredits: walletClientHash
         ? await getWalletCredits(db, walletClientHash)
         : row.credits,
     };
   }
 
-  const today = dayKey(now);
   const unitCost = mode === 'compatibility'
     ? Math.max(1, compatibilityCreditCost)
     : 1;
 
+  // The legacy daily_used column now stores the lifetime free allowance consumed
+  // by this anonymous subject. Keeping the column avoids a production D1 migration.
   const freeUpdate = await db.prepare(`
     UPDATE ai_clients
     SET
-      daily_date = ?,
-      daily_used = CASE WHEN daily_date = ? THEN daily_used + ? ELSE ? END,
+      daily_used = daily_used + ?,
       updated_at = CURRENT_TIMESTAMP
     WHERE client_id = ?
-      AND (
-        (daily_date <> ? AND ? <= ?)
-        OR (daily_date = ? AND daily_used + ? <= ?)
-      )
+      AND daily_used + ? <= ?
   `).bind(
-    today,
-    today,
-    unitCost,
     unitCost,
     clientId,
-    today,
     unitCost,
-    freeDailyLimit,
-    today,
-    unitCost,
-    freeDailyLimit,
+    freeTotalLimit,
   ).run();
 
   if (changes(freeUpdate) > 0) {
-    const previousUsed = row?.daily_date === today ? row.daily_used : 0;
+    const previousUsed = Math.max(0, Number(row?.daily_used ?? 0));
     return {
       allowed: true,
       kind: 'free',
       units: unitCost,
-      remainingFree: Math.max(0, freeDailyLimit - previousUsed - unitCost),
+      remainingFree: Math.max(0, freeTotalLimit - previousUsed - unitCost),
       remainingCredits: walletClientHash
         ? await getWalletCredits(db, walletClientHash)
         : row?.credits ?? 0,
@@ -242,7 +232,6 @@ export async function refundQuota(
   if (!charge.allowed || charge.kind === 'none' || charge.kind === 'vip') return;
 
   if (charge.kind === 'free') {
-    const today = dayKey(now);
     await db.prepare(`
       UPDATE ai_clients
       SET daily_used = CASE
@@ -250,8 +239,8 @@ export async function refundQuota(
             ELSE 0
           END,
           updated_at = CURRENT_TIMESTAMP
-      WHERE client_id = ? AND daily_date = ?
-    `).bind(charge.units, charge.units, clientId, today).run();
+      WHERE client_id = ?
+    `).bind(charge.units, charge.units, clientId).run();
     return;
   }
 

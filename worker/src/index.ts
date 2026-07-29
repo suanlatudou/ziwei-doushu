@@ -35,6 +35,7 @@ export interface Env {
   DEEPSEEK_THINKING?: string;
   ALLOWED_ORIGINS?: string;
   TURNSTILE_SECRET?: string;
+  FREE_TOTAL_LIMIT?: string;
   FREE_DAILY_LIMIT?: string;
   COMPATIBILITY_CREDIT_COST?: string;
   AI_CACHE_TTL_SECONDS?: string;
@@ -80,7 +81,7 @@ const MAX_BODY_BYTES = 320_000;
 const MAX_CHART_CHARS = 180_000;
 const MAX_MESSAGES = 12;
 const MAX_MESSAGE_CHARS = 12_000;
-const DEFAULT_FREE_DAILY_LIMIT = 3;
+const DEFAULT_FREE_TOTAL_LIMIT = 3;
 const DEFAULT_COMPATIBILITY_COST = 1;
 const DEFAULT_CACHE_TTL_SECONDS = 604_800;
 const MAX_CACHE_TTL_SECONDS = 2_592_000;
@@ -216,7 +217,7 @@ async function resolveSubjectKey(request: Request, body: InterpretRequest): Prom
   const ip = request.headers.get('CF-Connecting-IP') || 'unknown';
   const userAgent = request.headers.get('User-Agent') || 'unknown';
 
-  // 免费次数主体仍以网络环境为主，避免通过清空 localStorage 无限刷新免费额度。
+  // 免费总额主体仍以网络环境为主，避免通过清空 localStorage 无限刷新免费额度。
   // clientId 只在本地开发无 CF-IP 时兜底；线上 clientId 仅用于付费钱包。
   const localFallback = ip === 'unknown' ? (body.clientId || 'anonymous') : '';
   return `subject:${await sha256Hex(`${ip}|${userAgent}|${localFallback}`)}`;
@@ -618,9 +619,9 @@ export default {
       }
     }
 
-    const freeDailyLimit = parsePositiveInteger(
-      env.FREE_DAILY_LIMIT,
-      DEFAULT_FREE_DAILY_LIMIT,
+    const freeTotalLimit = parsePositiveInteger(
+      env.FREE_TOTAL_LIMIT ?? env.FREE_DAILY_LIMIT,
+      DEFAULT_FREE_TOTAL_LIMIT,
       100,
     );
     const compatibilityCost = parsePositiveInteger(
@@ -636,7 +637,7 @@ export default {
         db,
         subjectKey,
         mode,
-        freeDailyLimit,
+        freeTotalLimit,
         compatibilityCost,
         walletClientHash,
       );
@@ -647,7 +648,7 @@ export default {
 
     if (!charge.allowed) {
       return jsonResponse({
-        error: '今日免费次数和付费次数均已用完，请充值次数或开通 VIP',
+        error: '免费体验次数和付费次数均已用完，请充值次数或开通 VIP',
         code: 'INSUFFICIENT_QUOTA',
         remainingFree: charge.remainingFree ?? 0,
         remainingCredits: charge.remainingCredits ?? 0,
