@@ -13,7 +13,7 @@
     "DEEPSEEK_MODEL": "deepseek-v4-flash",
     "DEEPSEEK_THINKING": "disabled",
     "ALLOWED_ORIGINS": "https://metisziwei.com,https://www.metisziwei.com,https://ziwei-doushu-5xd.pages.dev,https://agent-fix-payment-launch.ziwei-doushu-5xd.pages.dev",
-    "FREE_DAILY_LIMIT": "3",
+    "FREE_DAILY_LIMIT": "999999",
     "COMPATIBILITY_CREDIT_COST": "1",
     "AI_CACHE_TTL_SECONDS": "604800",
     "AFDIAN_USER_ID": "007427e2883311f1809d52540025c377",
