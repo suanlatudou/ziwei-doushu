@@ -565,7 +565,7 @@ export default function HemingPage() {
         }}>
           <div style={{ fontSize: '12px', fontWeight: 600, color: 'var(--ac)', marginBottom: '6px' }}>合盘使用提示</div>
           <p style={{ fontSize: '12px', lineHeight: 1.75, color: 'var(--tx-2)', marginBottom: '10px' }}>
-            合盘属于双人专项 AI 解读，每次消耗 2 次额度；VIP 与缓存命中不扣次数。结果与评分均仅供传统文化学习、关系沟通与个人思考参考，不代表关系的确定结论，也不应作为婚姻、教育、合作或其他重大决定的唯一依据。
+            合盘属于双人专项 AI 解读，当前可免费使用。结果与评分均仅供传统文化学习、关系沟通与个人思考参考，不代表关系的确定结论，也不应作为婚姻、教育、合作或其他重大决定的唯一依据。
           </p>
           <label style={{ display: 'flex', alignItems: 'flex-start', gap: '9px', cursor: 'pointer', fontSize: '12px', color: 'var(--tx-1)' }}>
             <input

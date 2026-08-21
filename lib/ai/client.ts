@@ -177,7 +177,7 @@ async function readErrorDetails(response: Response): Promise<{
   const fallback = response.status === 404
     ? '当前站点的 AI 接口尚未部署，请检查 Cloudflare Pages Functions 构建结果。'
     : response.status === 402
-      ? '免费体验次数和付费次数均已用完，请充值次数或开通 VIP。'
+      ? 'AI 服务暂时不可用，请稍后重试。'
       : response.status === 429
         ? '请求过于频繁，请稍后再试。'
         : response.status === 401

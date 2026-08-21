@@ -4,7 +4,6 @@ import {
   type AiMode,
 } from './knowledge';
 import {
-  chargeQuota,
   getCachedResponse,
   purgeExpiredCache,
   recordUsage,
@@ -16,9 +15,7 @@ import {
 import {
   handleAfdianWebhook,
   handleBillingSession,
-  hashBillingClientId,
   isBillingConfigured,
-  isValidBillingClientId,
 } from './billing';
 
 interface RateLimitBinding {
@@ -217,15 +214,9 @@ async function resolveSubjectKey(request: Request, body: InterpretRequest): Prom
   const ip = request.headers.get('CF-Connecting-IP') || 'unknown';
   const userAgent = request.headers.get('User-Agent') || 'unknown';
 
-  // 免费总额主体仍以网络环境为主，避免通过清空 localStorage 无限刷新免费额度。
-  // clientId 只在本地开发无 CF-IP 时兜底；线上 clientId 仅用于付费钱包。
+  // 使用稳定匿名主体记录缓存与运行情况，不用于限制免费次数。
   const localFallback = ip === 'unknown' ? (body.clientId || 'anonymous') : '';
   return `subject:${await sha256Hex(`${ip}|${userAgent}|${localFallback}`)}`;
-}
-
-async function resolveWalletClientHash(clientId: string | undefined): Promise<string | undefined> {
-  if (!clientId || !isValidBillingClientId(clientId)) return undefined;
-  return hashBillingClientId(clientId);
 }
 
 function stripChartIdentity(value: unknown): unknown {
@@ -542,9 +533,6 @@ export default {
     if (origin && !isAllowedOrigin(origin, allowedOrigins)) {
       return jsonResponse({ error: '当前来源未获授权' }, 403, headers);
     }
-    if (!isBillingConfigured(env)) {
-      return jsonResponse({ error: '次数服务尚未完成安全配置，请稍后再试' }, 503, headers);
-    }
     if (!env.DEEPSEEK_API_KEY) {
       return jsonResponse({ error: 'AI 服务尚未配置' }, 503, headers);
     }
@@ -619,41 +607,8 @@ export default {
       }
     }
 
-    const freeTotalLimit = parsePositiveInteger(
-      env.FREE_TOTAL_LIMIT ?? env.FREE_DAILY_LIMIT,
-      DEFAULT_FREE_TOTAL_LIMIT,
-      100,
-    );
-    const compatibilityCost = parsePositiveInteger(
-      env.COMPATIBILITY_CREDIT_COST,
-      DEFAULT_COMPATIBILITY_COST,
-      100,
-    );
-    const walletClientHash = await resolveWalletClientHash(body.clientId);
-
-    let charge: ChargeResult = NO_CHARGE;
-    try {
-      charge = await chargeQuota(
-        db,
-        subjectKey,
-        mode,
-        freeTotalLimit,
-        compatibilityCost,
-        walletClientHash,
-      );
-    } catch (error) {
-      console.error('Quota charge failed', error);
-      return jsonResponse({ error: '次数服务暂时不可用，请稍后重试' }, 503, headers);
-    }
-
-    if (!charge.allowed) {
-      return jsonResponse({
-        error: '免费体验次数和付费次数均已用完，请充值次数或开通 VIP',
-        code: 'INSUFFICIENT_QUOTA',
-        remainingFree: charge.remainingFree ?? 0,
-        remainingCredits: charge.remainingCredits ?? 0,
-      }, 402, headers);
-    }
+    // 当前站点免费开放 AI：保留账单与历史数据结构，但不扣免费额度或付费余额。
+    const charge: ChargeResult = NO_CHARGE;
 
     let systemMessage: ChatMessage;
     try {
